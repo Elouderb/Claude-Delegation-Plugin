@@ -1,0 +1,3 @@
+# Task Cards MCP Server requirements
+mcp>=0.1.0
+fastmcp>=0.1.0

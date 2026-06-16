@@ -1,0 +1,10 @@
+{
+  "mcpServers": {
+    "task-cards": {
+      "command": "python3",
+      "args": ["/path/to/task-cards/server.py"],
+      "disabled": false,
+      "autoConnect": true
+    }
+  }
+}
