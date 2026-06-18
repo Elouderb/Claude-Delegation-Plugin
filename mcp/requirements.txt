@@ -1,3 +1,14 @@
 # Task Cards MCP Server requirements
+#
+# Core: required for the card tools and code-graph tools. The server imports
+# FastMCP from `mcp.server.fastmcp`, so only the `mcp` package is needed.
 mcp>=0.1.0
-fastmcp>=0.1.0
+
+# Optional: only needed if you use the database-graph tools (db_* / the
+# mcp/db_tools/ Flask viewer), which connect to Microsoft SQL Server.
+# Install separately, e.g.:  pip install -r requirements.txt pyodbc networkx pyvis flask python-dotenv
+# pyodbc          # SQL Server connectivity (also needs the system ODBC driver)
+# networkx        # graph construction in build_db_graph.py
+# pyvis           # HTML visualization in build_graph_html.py
+# flask           # mcp/db_tools/app.py graph viewer
+# python-dotenv   # loads DB_CONNECTION_STRING from .env
