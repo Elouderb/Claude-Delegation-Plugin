@@ -23,8 +23,8 @@ CODE_GRAPH_HTML = CODE_GRAPH_DIR / "graph.html"
 CODE_GRAPH_JSON = CODE_GRAPH_DIR / "graph.json"
 CODE_GRAPH_REPORT = CODE_GRAPH_DIR / "GRAPH_REPORT.md"
 
-BUILD_SCRIPT = BASE_DIR / "build_db_graph.py"
-VISUALIZE_SCRIPT = BASE_DIR / "visualize_db_graph.py"
+BUILD_SCRIPT = BASE_DIR / "db_tools" / "build_db_graph.py"
+VISUALIZE_SCRIPT = BASE_DIR / "db_tools" / "build_graph_html.py"
 
 load_dotenv(BASE_DIR / ".env")
 app = Flask(__name__)
@@ -79,7 +79,7 @@ def index():
 def db_graph():
     if not DB_GRAPH_HTML.exists():
         return Response(
-            "<h1>Database Graph not found</h1><p>Run build_db_graph.py and visualize_db_graph.py, or POST to /refresh/db.</p>",
+            "<h1>Database Graph not found</h1><p>Run build_db_graph.py and build_graph_html.py, or POST to /refresh/db.</p>",
             status=404,
             mimetype="text/html",
         )
@@ -154,7 +154,7 @@ def health():
 @app.post("/refresh/db")
 def refresh_db():
     if not BUILD_SCRIPT.exists() or not VISUALIZE_SCRIPT.exists():
-        return jsonify({"error": "build_db_graph.py or visualize_db_graph.py is missing"}), 500
+        return jsonify({"error": "build_db_graph.py or build_graph_html.py is missing"}), 500
     if not os.getenv("DB_CONNECTION_STRING"):
         return jsonify({"error": "DB_CONNECTION_STRING is not set"}), 500
 

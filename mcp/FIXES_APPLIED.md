@@ -75,20 +75,54 @@ This document summarizes the three critical fixes applied to make the Task Cards
 
 ---
 
-## Verification
+> **Note (2026-06-18):** A later full review found that the "no hardcoded paths"
+> and "production-ready" claims below were premature — several real defects
+> remained (see the 2026-06-18 section). Treat the checkmarks below as scoped to
+> the three issues in this 2026-06-16 round only.
 
-✅ All syntax checks pass
-✅ All unit tests pass (8/8)
-✅ No hardcoded absolute paths
-✅ No relative path traversals
-✅ Zero breaking changes
-✅ Backward compatible
+## Verification (2026-06-16 round)
 
-## Ready for Deployment
+- All syntax checks pass
+- All card unit tests pass (8/8)
+- Zero breaking changes to the card tools
 
-The plugin is now production-ready for the plugins folder with:
-- Improved error handling and observability
-- Flexible path resolution for different setups
-- Clear documentation of design decisions
-- All tests passing
+---
+
+## 2026-06-18 Review Fixes
+
+A full plugin review surfaced and fixed the following:
+
+### Packaging
+- **Added `.claude-plugin/plugin.json`** — the required plugin manifest was
+  missing, so the package could not load as a proper Claude Code plugin.
+- **`.mcp.json` portability** — replaced hardcoded `.venv` absolute paths with
+  `python3` + `${CLAUDE_PLUGIN_ROOT}/mcp/server.py`.
+- **Secrets** — added `.env.example`; confirmed the real `.env` is gitignored and
+  was never committed.
+
+### Database graph (was fully broken)
+- **`server.py refresh_database_graph()`** ran `build_db_graph.py` /
+  `build_graph_html.py` from the repo root, but they live in `mcp/db_tools/`.
+  Every `db_*` tool failed with `CalledProcessError`. Added `find_db_tools_dir()`
+  to locate the scripts next to `server.py` (with fallbacks). The earlier
+  "Issue #2" fix patched `start_graph_server()` but missed this function.
+- **`db_tools/app.py`** referenced a nonexistent `visualize_db_graph.py` and used
+  the wrong base directory for the build scripts. Corrected to
+  `db_tools/build_graph_html.py`.
+
+### Correctness / portability
+- **`update_card`** now validates `status` against `Created / In Progress /
+  Complete` instead of accepting any string.
+- **`scripts/sync_repo_graph.py`** no longer emits the health JSON twice on
+  `SessionStart`.
+- **`hooks/hooks.json`** uses `python3` instead of bare `python`.
+
+### Verification
+- Card unit tests pass (8/8), all Python compiles, all JSON validates, and
+  `claude plugin validate .` passes.
+
+### Known remaining limitations
+- `db_*` tools refresh the graph synchronously (up to ~60s), blocking the event
+  loop. The database subsystem also requires a live SQL Server + `.env`.
+- `datetime.utcnow()` is still used (deprecated but functional on 3.12).
 

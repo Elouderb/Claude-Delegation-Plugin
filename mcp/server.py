@@ -28,6 +28,9 @@ db_path: Optional[Path] = None
 # Flask app process (initialized in setup)
 flask_process: Optional[subprocess.Popen] = None
 
+# Allowed card lifecycle states
+VALID_STATUSES = ("Created", "In Progress", "Complete")
+
 
 def log(message: str):
     """Log a message to stdout with timestamp."""
@@ -206,14 +209,35 @@ def get_repo_root() -> Path:
     return current_dir
 
 
+def find_db_tools_dir() -> Optional[Path]:
+    """Locate the db_tools directory containing the graph build scripts.
+
+    Checks alongside this server file first, then common install layouts.
+    """
+    candidates = [
+        Path(__file__).resolve().parent / "db_tools",  # mcp/db_tools (next to server.py)
+        get_repo_root() / "mcp" / "db_tools",          # Installed under mcp/
+        get_repo_root() / "db_tools",                  # Installed at repo root
+    ]
+    for path in candidates:
+        if (path / "build_db_graph.py").exists():
+            return path
+    return None
+
+
 def refresh_database_graph() -> tuple[bool, Optional[str]]:
     """Rebuild database graph by running build scripts. Returns (success, error_msg)."""
     try:
         repo_root = get_repo_root()
+        db_tools = find_db_tools_dir()
+        if db_tools is None:
+            error_msg = "Graph build scripts not found (build_db_graph.py / build_graph_html.py)"
+            log(f"ERROR refreshing database graph: {error_msg}")
+            return False, error_msg
 
-        # Run build_db_graph.py
+        # Run build_db_graph.py (writes to .agent-os/db relative to cwd=repo_root)
         result = subprocess.run(
-            [sys.executable, str(repo_root / "build_db_graph.py")],
+            [sys.executable, str(db_tools / "build_db_graph.py")],
             cwd=repo_root,
             check=True,
             capture_output=True,
@@ -224,7 +248,7 @@ def refresh_database_graph() -> tuple[bool, Optional[str]]:
 
         # Run build_graph_html.py
         result = subprocess.run(
-            [sys.executable, str(repo_root / "build_graph_html.py")],
+            [sys.executable, str(db_tools / "build_graph_html.py")],
             cwd=repo_root,
             check=True,
             capture_output=True,
@@ -1234,6 +1258,9 @@ def update_card(card_id: str, title: Optional[str] = None,
     try:
         if not db_conn:
             raise RuntimeError("Database not initialized. Server may not have started properly.")
+
+        if status is not None and status not in VALID_STATUSES:
+            return {"error": f"Invalid status '{status}'. Must be one of: {', '.join(VALID_STATUSES)}"}
 
         cursor = db_conn.cursor()
 

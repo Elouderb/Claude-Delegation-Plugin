@@ -36,50 +36,47 @@
 
 ---
 
-## Files Ready for Transfer
+## Plugin Layout
+
+This is a Claude Code plugin. The full plugin root contains:
 
 ```
-mcp/
-├── server.py                    ← Main MCP server (FIXED: 3 issues resolved)
-├── test_server.py              ← Test suite (VERIFIED: 8/8 passing)
-├── example_usage.py            ← Usage examples
-├── setup-mcp.sh                ← Integration helper
-├── requirements.txt            ← Dependencies (NEW: created)
-├── db_tools/                   ← Graph server
-│   ├── app.py
-│   ├── build_db_graph.py
-│   └── build_graph_html.py
-├── README.md                   ← Quick start
-├── CLAUDE.md                   ← Full docs
-├── INTEGRATION.md              ← Setup guide
-├── PROJECT_SUMMARY.md          ← Feature overview
-├── FIXES_APPLIED.md            ← Change log (NEW: created)
-└── DEPLOYMENT_CHECKLIST.md     ← This file (NEW: created)
+agent-os/
+├── .claude-plugin/plugin.json   ← Plugin manifest (required)
+├── .mcp.json                    ← MCP server config (uses ${CLAUDE_PLUGIN_ROOT})
+├── hooks/hooks.json             ← Graph-sync + file-protection hooks
+├── scripts/                     ← Hook implementations
+├── agents/                      ← 5 delegation agents
+├── skills/                      ← 17 workflow skills
+└── mcp/
+    ├── server.py                ← MCP server (cards + 18 graph tools)
+    ├── test_server.py           ← Card test suite (8/8 passing)
+    ├── requirements.txt         ← Dependencies
+    └── db_tools/                ← Optional SQL Server graph builder
+        ├── app.py
+        ├── build_db_graph.py
+        └── build_graph_html.py
 ```
 
 ---
 
 ## Installation Instructions for Users
 
-### Step 1: Install to Plugins Folder
+### Step 1: Install dependencies
 ```bash
-# Copy to your Claude Code plugins folder
-cp -r mcp ~/.claude/plugins/task-cards
-
-# Install dependencies
-cd ~/.claude/plugins/task-cards
-pip install -r requirements.txt
+pip install -r mcp/requirements.txt
 ```
 
-### Step 2: Enable in Project
+### Step 2: Load the plugin in Claude Code
 ```bash
-cd /path/to/your/project
-~/.claude/plugins/task-cards/setup-mcp.sh
+claude --plugin-dir /path/to/agent-os
 ```
+The manifest, MCP server, hooks, agents, and skills are auto-discovered. Because
+`.mcp.json` uses `${CLAUDE_PLUGIN_ROOT}`, no path editing is required.
 
-### Step 3: Restart Claude Code
-- Restart Claude Code in the project directory
-- Task cards tools will be automatically available
+### Step 3: Verify
+- `claude plugin validate /path/to/agent-os` should pass.
+- The `task-cards` MCP tools should appear in the MCP tools list.
 
 ### Step 4: Start Using
 ```python
@@ -149,7 +146,12 @@ If issues arise after deployment:
 
 ## Status
 
-### READY FOR PRODUCTION ✅
+### Card system: ready. Database graph: optional, see caveats.
 
-This plugin is ready to be moved to the plugins folder with confidence. All three critical issues have been resolved, all tests pass, and deployment is straightforward.
+- The **card system** (6 tools) is functional and tested (8/8), and the plugin
+  loads and passes `claude plugin validate`.
+- The **database-graph subsystem** is optional: it requires a live SQL Server and
+  a configured `.env`, and it refreshes synchronously (can block up to ~60s per
+  `db_*` call). See `FIXES_APPLIED.md` (2026-06-18) for the current change history
+  and known limitations.
 

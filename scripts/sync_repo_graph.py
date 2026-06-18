@@ -48,8 +48,6 @@ def main() -> int:
         ok, message = refresh_graphify(root, args.reason)
         if not ok:
             print(json.dumps({"systemMessage": message}))
-    elif args.health:
-        emit_health(root, graph_report)
 
     if args.health:
         emit_health(root, graph_report)

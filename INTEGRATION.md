@@ -1,23 +1,35 @@
 # Integration Guide
 
-How to integrate task-cards MCP server with Claude Code and your projects.
+How to integrate the Agent OS plugin (and its `task-cards` MCP server) with Claude
+Code and your projects.
 
-## Quick Setup
-
-### 1. Global Installation
+## Recommended: load as a plugin
 
 ```bash
-cd /path/to/task-cards
-pip install -r requirements.txt
-bash install.sh
+pip install -r mcp/requirements.txt
+claude --plugin-dir /path/to/agent-os
 ```
 
-### 2. Enable for Your Project
+This auto-discovers the manifest, MCP server (`.mcp.json`), hooks, agents, and
+skills. Because `.mcp.json` uses `${CLAUDE_PLUGIN_ROOT}`, nothing needs editing per
+machine. Run `claude plugin validate /path/to/agent-os` to confirm it loads.
 
-In any project, run:
+## Alternative: per-project MCP config (no plugin)
+
+If you only want the card/graph MCP tools in a single project (without the hooks,
+agents, and skills), you can wire just the server:
+
+### 1. Install dependencies
 
 ```bash
-/path/to/task-cards/setup-mcp.sh
+cd /path/to/agent-os
+pip install -r mcp/requirements.txt
+```
+
+### 2. Enable for your project
+
+```bash
+/path/to/agent-os/mcp/setup-mcp.sh
 ```
 
 This creates a `.mcp.json` file in your project root that:
