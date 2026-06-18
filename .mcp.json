@@ -1,8 +1,8 @@
 {
   "mcpServers": {
     "task-cards": {
-      "command": "/home/ethos/Coding/new_programs/claude_code_3/.venv/bin/python",
-      "args": ["/home/ethos/Coding/new_programs/claude_code_3/mcp/server.py"]
+      "command": "python3",
+      "args": ["${CLAUDE_PLUGIN_ROOT}/mcp/server.py"]
     }
   }
 }

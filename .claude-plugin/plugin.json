@@ -1,0 +1,9 @@
+{
+  "name": "agent-os",
+  "description": "Repository-local Agent OS: Jira-style task cards (SQLite MCP server), repository/database knowledge-graph tools, graph-sync hooks, and a delegation-oriented set of agents and skills for Claude Code.",
+  "version": "0.1.0",
+  "author": {
+    "name": "Elouderb"
+  },
+  "license": "MIT"
+}

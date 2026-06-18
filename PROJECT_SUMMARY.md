@@ -1,8 +1,16 @@
-# Task Cards MCP Server - Project Summary
+# Task Cards — Subsystem Summary
 
-## Completion Status: ✅ Complete
+> **Scope note:** This document summarizes the **task-cards subsystem** only. It is
+> one part of the larger **Agent OS** plugin, which also includes 18 code/database
+> graph tools, graph-sync hooks, 5 agents, and 17 skills. See `README.md` for the
+> full plugin overview and `mcp/DEPLOYMENT_CHECKLIST.md` for the current file
+> layout. Some details below (line counts, the illustrative file tree) describe an
+> earlier standalone layout and have since evolved — `server.py` now lives in
+> `mcp/` and also hosts the graph tools.
 
-A fully functional, repository-local task management system for Claude Code and AI agents.
+## Status: card system functional and tested
+
+A repository-local task management system for Claude Code and AI agents.
 
 ---
 
@@ -196,18 +204,19 @@ Orchestrator reviews:
 
 ## What's NOT Included (Intentional Scope)
 
-These are marked for future expansion:
+Still out of scope for the **card subsystem** specifically:
 
 - ❌ Agent ownership/assignment
 - ❌ Card dependencies
 - ❌ Card-to-file links
-- ❌ Memory integration
-- ❌ Multi-agent coordination
 - ❌ Priority queues
 - ❌ Archive functionality
 - ❌ Custom fields
 
-The system is intentionally simple and focused on core task tracking.
+The card subsystem stays intentionally simple. Note that at the **plugin** level,
+some of the originally "future" items now exist outside the card schema:
+code/database **graph integration** (the 18 `code_*` / `db_*` / `graph_*` tools)
+and **multi-agent coordination** (the `agents/` and `skills/` directories).
 
 ---
 
