@@ -129,8 +129,11 @@ def git_state_changed(root: Path) -> bool:
 
 def graphify_command(root: Path) -> list[str]:
     executable = os.getenv("AGENT_OS_GRAPHIFY_EXECUTABLE", "graphify")
-    # Baseline incremental update only. No semantic/deep/force flags.
-    command = [executable, ".", "--update"]
+    # Baseline incremental, code-only update. The `update <path>` subcommand
+    # rebuilds graph.json without an LLM key; the older `. --update` form fell
+    # into the semantic-extraction path, which errors out with no API key and
+    # never rebuilds the graph.
+    command = [executable, "update", "."]
     # Allow extra args without code changes, e.g.
     # AGENT_OS_GRAPHIFY_ARGS="--backend ollama" to enable semantic extraction.
     extra = os.getenv("AGENT_OS_GRAPHIFY_ARGS")

@@ -4,6 +4,59 @@ All notable changes to the **agent-os** plugin are documented here. The format i
 based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/), and this project
 adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.1.7] - 2026-06-19
+
+### Fixed
+- **Code graph never refreshed (blocker):** All three `graphify` refresh call
+  sites — `graphify_command()` in `scripts/hook_common.py`, the `graph_refresh`
+  MCP tool in `mcp/server.py`, and the `/<slug>/refresh/repo` route in
+  `mcp/db_tools/app.py` — invoked `graphify . --update`. The graphify CLI uses
+  subcommand syntax (`graphify update <path>`), so `.` was parsed as the command
+  name. That form fell into the default semantic-extraction path, which errors
+  out with "no LLM API key" and never rebuilds `graph.json`; because
+  `refresh_graphify()` treats the no-key message as a clean no-op, the code graph
+  silently never updated. Corrected to `graphify update .` (code-only rebuild, no
+  LLM key required). The 0.1.5 changelog's `["graphify", ".", "--update"]` "fix"
+  standardized every site onto this broken form; this reverses it.
+- **Graph UI never started (blocker):** `flask` and `python-dotenv` were listed
+  as *optional* dependencies bundled with the SQL-Server db subsystem, but
+  `mcp/db_tools/app.py` imports both at module level and serves the code graph
+  and task cards — core features. The MCP server spawns this app on startup, so
+  with flask absent it crashed on `import flask` every boot and never bound its
+  port. Promoted `flask` + `python-dotenv` to core requirements in
+  `mcp/requirements.txt`.
+- **Docs:** `README.md` and `hooks/README.md` updated to show `graphify update .`.
+
+## [0.1.6] - 2026-06-19
+
+### Added
+- **Multi-repo graph UI:** `mcp/db_tools/app.py` now supports multiple concurrent
+  Claude Code instances. Each MCP instance registers its repo root in
+  `~/.agent-os/active_repos.json` on startup (`_register_repo()` in `mcp/server.py`).
+  The Flask server reads this registry on every request and exposes a per-repo URL
+  namespace: `/<slug>/code_graph`, `/<slug>/db_graph`, `/<slug>/task_cards`.
+  The home page (`/`) lists all registered repos; repo slugs are derived from the
+  directory name with a parent-dir prefix on collision.
+- **Task cards web view:** `/<slug>/task_cards` renders a simple HTML table of cards
+  read directly from `.agent-os/cards.sqlite` via `sqlite3` — no ORM needed.
+
+### Fixed
+- **XSS in graph UI (HIGH):** `_slug_not_found` and `_missing_file` now escape the
+  `slug` and `msg` arguments with `markupsafe.escape` before interpolating into HTML.
+- **XSS in graph UI (MEDIUM):** `repo_index` and `task_cards` routes now escape the
+  `slug` for HTML text/title contexts (`escape(slug)`) and URL-encode it for href
+  and JS `fetch()` string contexts (`urllib.parse.quote(slug, safe="")`). Slugs
+  appearing in the home-page repo list (`index`) are also escaped.
+- **Stored XSS in task_cards (MEDIUM):** All database-sourced values (`card_id`,
+  `title`, `status`, `priority`, `updated_at`) are now escaped with
+  `markupsafe.escape` before being interpolated into the HTML table.
+- **Exception info disclosure in task_cards:** The bare `{exc}` interpolation in the
+  SQLite error handler is replaced with a generic message; the exception is logged to
+  `stderr` instead.
+- **Cross-repo `.env` isolation:** `refresh_db` now uses `dotenv_values()` (returns
+  a dict; no side effects on `os.environ`) and passes the connection string explicitly
+  to the subprocess, preventing `.env` from one repo leaking into another.
+
 ## [0.1.5] - 2026-06-19
 
 ### Fixed

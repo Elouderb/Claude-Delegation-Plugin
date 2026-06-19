@@ -15,7 +15,7 @@ Claude Code plugin. Plugin hooks are therefore the safer portable default.
 The plugin runs only the baseline incremental Graphify update:
 
 ```bash
-graphify . --update
+graphify update .
 ```
 
 It never adds semantic, deep, force, or LLM-deduplication flags.
