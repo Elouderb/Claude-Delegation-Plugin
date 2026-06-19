@@ -7,4 +7,4 @@ description: Preload for the test-engineer agent; use to execute tests, isolate 
 
 Run planned checks with explicit commands. Capture command, status, failing tests, relevant output, whether failures are new or pre-existing, and coverage gaps.
 
-Use graph tools to trace failures to likely symbols or DB objects, but do not change production architecture unless assigned. Record results with `add_comment`. Return `PASS`, `FAIL`, or `BLOCKED` with reproducible next steps.
+Trace failures to likely symbols or DB objects with `code_find_callers`, `code_impact_analysis`, and (for persistence) `db_get_routine_dependencies`, but do not change production architecture unless assigned. Record results with `add_comment`. Return `PASS`, `FAIL`, or `BLOCKED` with reproducible next steps.

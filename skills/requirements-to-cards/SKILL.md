@@ -7,7 +7,7 @@ description: Preload for the research-planner agent; use to convert ambiguous or
 
 1. Clarify outcome, non-goals, constraints, and success criteria.
 2. Inspect existing work with `list_cards`.
-3. Query code and DB graphs to identify affected components.
+3. Identify affected components with `code_search_symbols`, `code_get_dependencies`, and `graph_get_subgraph`; for persistence work also use `db_search_schema` and `db_get_table`.
 4. Break work into independently testable units.
 5. Define objective, context, acceptance criteria, dependencies, node IDs, tests, and recommended agent for each unit.
 6. Use `create_card` only when instructed to materialize the plan.

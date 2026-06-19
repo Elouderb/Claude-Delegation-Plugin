@@ -1,329 +1,140 @@
 # Development Operating Model
 
-The primary agent is Opus acting as technical lead, planner, delegator, and final integrator.
+This project uses the **agent-os** plugin: a delegation-driven workflow built around
+project-local task cards, a repository (code) graph, and an optional database graph.
 
-Opus should delegate implementation by default rather than performing substantial coding directly.
+The lead (orchestrating) agent acts as technical lead, planner, delegator, and final
+integrator. The lead should delegate implementation by default rather than performing
+substantial coding directly, and is the only agent that marks a card Complete.
+
+Plugin skills encode each step of this workflow. Invoke them as `agent-os:<skill-name>`.
+When prose here describes a workflow, the matching skill is the executable version — follow
+it instead of improvising.
 
 ## Required Context
 
 Before planning non-trivial work:
 
-1. Inspect relevant open cards.
-2. Query the repository graph.
-3. Query the database graph when persistence, schemas, SQL, models, migrations, or data flow may be involved.
-4. Inspect relevant files only after using the graph tools to narrow the search.
+1. Inspect relevant open cards (`agent-os:card-workflow`).
+2. Query the repository graph to narrow scope (`agent-os:code-graph-usage`,
+   `agent-os:graph-query-discipline`).
+3. Query the database graph **only if this project configures one** and the work touches
+   persistence, schemas, SQL, models, migrations, or data flow
+   (`agent-os:database-graph-usage`).
+4. Inspect files only after graph queries have narrowed the search.
+
+Use the smallest set of tools that gives sufficient context. Do not call every tool
+automatically, and do not run broad `Glob`/`Grep`/manual exploration before checking
+whether a graph query can narrow the scope first.
 
 ## Card Policy
 
-Significant work must be represented by a project-local card.
+Significant work must be represented by a project-local card. See `agent-os:card-workflow`
+for the mechanics and `agent-os:plan-feature` / `agent-os:requirements-to-cards` for
+decomposing larger or ambiguous work into cards.
 
-A card should contain:
-- objective
-- context
-- acceptance criteria
-- relevant files or graph nodes
-- dependencies
-- implementation notes
-- test requirements
+A card should contain: objective, context, acceptance criteria, relevant files or graph
+nodes, dependencies, implementation notes, and test requirements.
 
-Card lifecycle:
+Lifecycle: **Created → In Progress → Complete**
 
-Created → In Progress → Complete
+- **Before delegation:** create or select a card, ensure acceptance criteria are clear,
+  move it to In Progress.
+- **During work:** agents log meaningful progress and stay within card scope.
+- **Before completion:** implementation is reviewed, required tests pass, relevant docs are
+  updated, and any structural graph refresh succeeds.
 
-Before delegation:
-- create or select a card
-- ensure acceptance criteria are clear
-- move it to In Progress
-
-During work:
-- agents must log meaningful progress
-- agents must remain within card scope
-
-Before completion:
-- implementation must be reviewed
-- required tests must pass
-- relevant documentation must be updated
-- structural graph refreshes must succeed
-
-Only the lead agent should mark a card Complete.
+Only the lead agent marks a card Complete.
 
 ## Delegation Rules
 
-Use `implementer` for scoped coding tasks with established architecture.
+| Situation | Agent | Preloaded skill |
+|---|---|---|
+| Scoped coding with established architecture | `implementer` | `agent-os:scoped-implementation`, `agent-os:execute-card` |
+| Review after every significant implementation | `code-reviewer` | `agent-os:independent-code-review`, `agent-os:review-risk-triage` |
+| Changed behavior, bug fixes, APIs, integrations, DB work | `test-engineer` | `agent-os:targeted-test-planning`, `agent-os:test-execution-reporting` |
+| Schema, migration, SQL, index, procedure, function, data-model work | `database-engineer` | `agent-os:migration-safety`, `agent-os:sql-routine-analysis` |
+| Unclear requirements or implementation choices | `research-planner` | `agent-os:architecture-research`, `agent-os:requirements-to-cards` |
 
-Use `code-reviewer` after every significant implementation.
-
-Use `test-engineer` for changed behavior, bug fixes, APIs, integrations, and database work.
-
-Use `database-engineer` for schema, migration, SQL, index, procedure, function, or data-model work.
-
-Use `research-planner` when requirements or implementation choices remain unclear.
-
-The lead agent may code directly only when:
-- the change is trivial
-- delegation would cost more context than execution
-- the change is an urgent correction during integration
+The lead may code directly only when the change is trivial, delegation would cost more
+context than execution, or it is an urgent correction during integration.
 
 ## Completion Workflow
 
-For each significant card:
+For each significant card (`agent-os:review-and-close`):
 
-1. Plan and identify graph context.
-2. Delegate implementation.
-3. Delegate testing when appropriate.
+1. Plan and identify graph context (`agent-os:plan-feature`).
+2. Delegate implementation (`agent-os:execute-card`).
+3. Delegate testing when behavior changed.
 4. Delegate review.
 5. Resolve review findings.
 6. Refresh affected graphs.
-7. Update card history.
+7. Update card history (`agent-os:card-workflow`).
 8. Mark Complete.
 9. Summarize the result to the user.
+
+## Tooling
+
+All cards and graph data belong to the **current** Git repository. Never use task state or
+generated graph data from another project.
+
+### Cards (work state)
+
+`create_card`, `list_cards`, `get_card`, `update_card`, `add_comment`, `complete_card`.
+See `agent-os:card-workflow`. Use card tools to track work, not to narrate every minor
+action.
+
+### Repository (code) graph
+
+| Situation | Tool |
+|---|---|
+| Implementation location unknown | `code_search_symbols` |
+| Exact symbol known; need full metadata | `code_get_symbol` |
+| What a symbol depends on / what depends on it | `code_get_dependencies` |
+| Before changing a signature, behavior, or side effects | `code_find_callers` |
+| Before changing shared symbols, APIs, or architecture | `code_impact_analysis` |
+
+Generic graph operations work on either graph: `graph_search_nodes`, `graph_get_node`,
+`graph_get_neighbors`, `graph_find_path`, `graph_get_subgraph`. Check freshness with
+`graph_status` and rebuild after structural changes with `graph_refresh`. Prefer the
+specialized `code_*` tools over generic traversal when they directly match the question.
+See `agent-os:code-graph-usage` and `agent-os:graph-query-discipline`.
+
+### Database graph (optional — only if this project configures one)
+
+This half applies **only** to projects whose database-graph subsystem is configured against
+a live **SQL Server** database. Projects with no database, or with a non-SQL-Server
+database, can ignore this section entirely; the rest of the operating model still applies.
+
+When configured, the database-specific tools rebuild the graph (`build_db_graph.py` then
+`build_graph_html.py`) before answering, so results reflect the current schema **only if
+that rebuild succeeds**. If a refresh fails, stop and report the failure rather than relying
+on stale output.
+
+| Situation | Tool |
+|---|---|
+| Known table: columns, keys, references, dependent routines | `db_get_table` |
+| A particular column / field attribute | `db_get_column` |
+| Relevant object not yet known | `db_search_schema` |
+| How one table connects to surrounding tables | `db_get_table_relationships` |
+| How two tables join / how data flows between them | `db_find_relationship_path` |
+| Tables/columns a procedure or function depends on | `db_get_routine_dependencies` |
+
+Preserve exact source/target key columns and never invent joins absent from the graph.
+Dynamic SQL may be under-represented — inspect routine source when a result looks
+incomplete. See `agent-os:database-graph-usage`, `agent-os:migration-safety`, and
+`agent-os:sql-routine-analysis`.
+
+### When not to trust the graph
+
+Use the graph to find scope, then read source, when: generated results are incomplete,
+dynamic SQL or runtime behavior is involved, source contradicts the graph, `graph_status`
+reports an error, or the behavior cannot be inferred from static structure.
 
 ## Safety and Scope
 
 - Do not modify unrelated files.
 - Do not perform destructive database operations without explicit approval.
 - Do not guess when graph or card results are ambiguous.
-- Do not treat generated graph files as manually editable source files.
-- Never use task state from another repository.
-
-
-# MCP Tool Usage Guide
-
-This project provides project-local task management, repository-graph, and database-graph tools. Use these tools before broad manual searching whenever they can answer the question more directly.
-
-All cards and graph data belong to the current Git repository. Never use task state or generated graph data from another project.
-
-## General Workflow
-
-For significant work:
-
-1. Find or create the relevant card.
-2. Read the complete card.
-3. Query the repository graph to identify relevant code.
-4. Query the database graph when persistence, SQL, models, migrations, procedures, or data flow may be involved.
-5. Perform the scoped work.
-6. Log progress and test results.
-7. Review the implementation.
-8. Mark the card Complete only after acceptance criteria are satisfied.
-
-Do not call every tool automatically. Use the smallest set that provides sufficient context.
-
----
-
-# Card Tools
-
-## `create_card`
-
-Use when a non-trivial task does not yet have a card.
-
-Create cards with a clear title, objective, description, priority, and testable acceptance criteria. Avoid creating cards for trivial isolated edits.
-
-## `list_cards`
-
-Use at the start of a session or planning operation to inspect current work.
-
-Filter by status or priority when possible. Check existing cards before creating duplicates.
-
-## `get_card`
-
-Use before working on, reviewing, testing, or completing a specific card.
-
-Treat the card as the source of truth for scope, requirements, acceptance criteria, and progress.
-
-## `update_card`
-
-Use to modify the card title, description, priority, or status.
-
-Move cards through only these states:
-
-* Created
-* In Progress
-* Complete
-
-Move a card to In Progress before implementation begins. Do not mark it Complete until review and required testing are finished.
-
-## `add_comment`
-
-Use to record meaningful work history.
-
-Comments should include relevant findings, files changed, graph nodes consulted, tests run, blockers, review results, and unresolved risks. Do not add low-value narration for every minor action.
-
-## `complete_card`
-
-Use only after all acceptance criteria are satisfied, required tests pass, review findings are resolved, and relevant generated graphs are current.
-
-Include a concise completion summary describing the implementation, verification, and remaining limitations.
-
----
-
-# Shared Graph Tools
-
-Shared tools accept a graph selector such as `database` or `code`.
-
-## `graph_search_nodes`
-
-Use when the exact node ID is unknown.
-
-Search by symbol, file, table, column, routine, or qualified name. Apply node-type filters and result limits. Do not guess when several matches are returned.
-
-## `graph_get_node`
-
-Use when a stable node ID is known and complete metadata is required.
-
-Prefer this over repository-wide search for inspecting a specific graph object.
-
-## `graph_get_neighbors`
-
-Use to inspect immediate or bounded incoming and outgoing relationships.
-
-Useful for discovering dependencies, dependents, contained objects, callers, callees, foreign-key links, and nearby architecture.
-
-## `graph_find_path`
-
-Use when determining how two known nodes are connected.
-
-Set relationship filters and a conservative maximum depth. Use directed traversal when dependency direction matters.
-
-## `graph_get_subgraph`
-
-Use when planning or reviewing work that affects a bounded architectural area.
-
-Start from one or more relevant nodes and request only enough depth to understand the task. Avoid loading the entire graph unnecessarily.
-
-## `graph_status`
-
-Use when graph freshness or availability is uncertain.
-
-Check generation time, file existence, counts, and staleness before relying on graph data for important decisions.
-
-## `graph_refresh`
-
-Use explicitly after structural code changes or when the graph is missing or stale.
-
-Database-specific tools already refresh the database graph automatically, so a separate database refresh is usually unnecessary before those calls.
-
----
-
-# Database Graph Tools
-
-Every database-specific tool automatically runs:
-
-```bash
-python build_db_graph.py
-python build_graph_html.py
-```
-
-before answering. Therefore, each result represents the current live database schema. If refresh fails, stop and report the failure rather than using stale output.
-
-## `db_get_table`
-
-Use when working with a known table.
-
-Returns table metadata, columns, primary keys, foreign keys, incoming references, outgoing references, and dependent procedures or functions.
-
-## `db_get_column`
-
-Use when a task concerns a particular field or schema attribute.
-
-Inspect SQL type, length, nullability, default, identity or computed status, primary/foreign-key role, owning table, linked columns, and routine dependencies.
-
-## `db_search_schema`
-
-Use when the relevant database object is not yet known.
-
-Search across Table, Column, Function, and Procedure nodes by name or qualified name.
-
-## `db_get_table_relationships`
-
-Use to understand how one table connects to surrounding tables.
-
-Prefer this for migration planning, ORM work, repository methods, delete behavior, and join reasoning. Preserve the exact source and target key columns.
-
-## `db_find_relationship_path`
-
-Use when determining how two tables can be joined or how data flows between them.
-
-Return the ordered table path and exact join-column pairs. Do not invent joins that are absent from the graph.
-
-## `db_get_routine_dependencies`
-
-Use when modifying or reviewing a stored procedure or function.
-
-Returns tables and columns connected through routine dependency relationships. Dynamic SQL may not be fully represented, so inspect routine source when the result appears incomplete.
-
----
-
-# Repository and Graphify Tools
-
-## `code_get_symbol`
-
-Use when the exact class, function, method, module, or other code symbol is known.
-
-Inspect its source location, container, callers, callees, imports, and connected symbols before editing it.
-
-## `code_search_symbols`
-
-Use when the relevant implementation location is unknown.
-
-Search classes, functions, methods, modules, files, interfaces, and services before falling back to broad file-system searches.
-
-## `code_get_dependencies`
-
-Use to understand what a symbol depends on and what depends on it.
-
-Specify direction, depth, and relationship types where possible. This is especially important before refactoring public or central components.
-
-## `code_find_callers`
-
-Use before changing a function or method’s signature, behavior, return value, or side effects.
-
-Inspect both direct and bounded transitive callers when the change may propagate through several layers.
-
-## `code_impact_analysis`
-
-Use before significant changes to shared symbols, APIs, interfaces, or architectural components.
-
-Use the result to identify affected callers, modules, tests, interfaces, and entry points. Treat graph facts as evidence; the lead agent remains responsible for the final impact judgment.
-
----
-
-# Tool Selection Rules
-
-Use card tools for **work state**.
-
-Use repository graph tools for **code structure**.
-
-Use database graph tools for **database structure**.
-
-Use shared graph tools for **generic node, neighborhood, path, and subgraph operations**.
-
-Prefer specialized tools such as `db_get_table` or `code_find_callers` over generic traversal when they directly match the question.
-
-Do not perform broad `Glob`, `Grep`, or manual file exploration before checking whether graph search can narrow the relevant scope.
-
-Do not rely exclusively on graph data when:
-
-* generated results are incomplete,
-* dynamic SQL or runtime behavior is involved,
-* source code contradicts graph output,
-* graph status reports an error,
-* or the requested behavior cannot be inferred from static structure.
-
-In those cases, use the graph to identify the likely scope, then inspect the actual source files.
-
-## Agent-Specific Expectations
-
-Implementation agents should read the assigned card and query relevant graph context before editing.
-
-Database agents should use database-specific tools before planning schema or SQL changes.
-
-Review agents should compare the diff against the card and use graph tools to check dependency impact.
-
-Test agents should use callers, dependents, and affected modules to select regression tests.
-
-The lead agent should use cards for coordination, delegate scoped work, resolve ambiguity, and mark cards Complete only after implementation, testing, and review succeed.
-
-
-# graphify
-- **graphify** (`~/.claude/skills/graphify/SKILL.md`) - any input to knowledge graph. Trigger: `/graphify`
-When the user types `/graphify`, invoke the Skill tool with `skill: "graphify"` before doing anything else.
+- Do not treat generated graph files as manually editable source.
+- Never use task state or graph data from another repository.

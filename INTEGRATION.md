@@ -3,16 +3,28 @@
 How to integrate the Agent OS plugin (and its `task-cards` MCP server) with Claude
 Code and your projects.
 
-## Recommended: load as a plugin
+## Recommended: install via the local marketplace
 
 ```bash
+# 1. Install the MCP server's Python dependencies
 pip install -r mcp/requirements.txt
-claude --plugin-dir /path/to/agent-os
+
+# 2. Register the local marketplace defined in .claude-plugin/marketplace.json
+#    (marketplace name: agent-os-local) and install the plugin:
+/plugin marketplace add /path/to/agent-os
+/plugin install agent-os@agent-os-local
+
+# 3. Then /reload-plugins (or restart Claude Code). Verify with /mcp.
 ```
 
 This auto-discovers the manifest, MCP server (`.mcp.json`), hooks, agents, and
-skills. Because `.mcp.json` uses `${CLAUDE_PLUGIN_ROOT}`, nothing needs editing per
-machine. Run `claude plugin validate /path/to/agent-os` to confirm it loads.
+skills. Because `.mcp.json` launches `python3 ${CLAUDE_PLUGIN_ROOT}/mcp/server.py`,
+nothing needs editing per machine. Run `claude plugin validate /path/to/agent-os`
+to confirm it loads.
+
+> **For local development of the plugin**, you can live-load the directory
+> instead: `claude --plugin-dir /path/to/agent-os`. This is a dev convenience,
+> not the primary install path.
 
 ### Gotcha: developing this plugin inside its own repository
 
@@ -45,7 +57,13 @@ resolves `${CLAUDE_PLUGIN_ROOT}` correctly and needs no such override.
 ## Alternative: per-project MCP config (no plugin)
 
 If you only want the card/graph MCP tools in a single project (without the hooks,
-agents, and skills), you can wire just the server:
+agents, and skills), you can wire just the server with `setup-mcp.sh`.
+
+> **Use this only in projects where the plugin is NOT installed.** `setup-mcp.sh`
+> writes a project-scope `.mcp.json` that also registers under the name
+> `task-cards`. If the plugin is installed too, both register under `task-cards`
+> and collide (see the gotcha above). Pick one mechanism per project: the
+> installed plugin **or** a project-scope `.mcp.json`, never both.
 
 ### 1. Install dependencies
 
@@ -165,8 +183,10 @@ archive_after_days = 30
 
 ### MCP server not connecting?
 - Verify Python path in settings is correct
-- Check `requirements.txt` dependencies are installed
-- Run `python3 /path/to/server.py` manually to test
+- Check `mcp/requirements.txt` dependencies are installed
+- Run `python3 mcp/server.py` manually to test. The server logs to **STDERR**
+  (required for MCP stdio transport — diagnostic output on STDOUT would corrupt
+  the protocol), so look there for startup errors.
 
 ### Getting "Card not found"?
 - Verify card_id is correct (8 chars, format: `abc12345`)
@@ -189,7 +209,7 @@ The MCP server automatically discovers which database to use based on the curren
 Verify the server works:
 
 ```bash
-python3 test_server.py
+cd mcp && python3 test_server.py
 ```
 
 Expected output:
@@ -199,25 +219,9 @@ Testing task-cards MCP server...
 ✓ All tests passed!
 ```
 
-## Advanced: Custom Agents
+## Usage Patterns
 
-Create a custom agent that uses task cards:
-
-```python
-from mcp.client.session import ClientSession
-
-async def my_agent():
-    async with ClientSession(process) as session:
-        # Tools are automatically available
-        result = await session.call_tool("create_card", {
-            "title": "My task",
-            "description": "Detailed description",
-            "priority": "high"
-        })
-        card_id = result.content[0].text
-```
-
-See `example_usage.py` for more patterns.
+See `mcp/example_usage.py` for runnable usage patterns.
 
 ## Next Steps
 

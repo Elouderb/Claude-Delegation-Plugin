@@ -3,6 +3,7 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import shlex
 import subprocess
 import sys
 import time
@@ -129,7 +130,13 @@ def git_state_changed(root: Path) -> bool:
 def graphify_command(root: Path) -> list[str]:
     executable = os.getenv("AGENT_OS_GRAPHIFY_EXECUTABLE", "graphify")
     # Baseline incremental update only. No semantic/deep/force flags.
-    return [executable, ".", "--update"]
+    command = [executable, ".", "--update"]
+    # Allow extra args without code changes, e.g.
+    # AGENT_OS_GRAPHIFY_ARGS="--backend ollama" to enable semantic extraction.
+    extra = os.getenv("AGENT_OS_GRAPHIFY_ARGS")
+    if extra:
+        command.extend(shlex.split(extra))
+    return command
 
 def refresh_graphify(root: Path, reason: str, timeout: int = 160) -> tuple[bool, str]:
     lock = lock_path(root)
@@ -155,9 +162,25 @@ def refresh_graphify(root: Path, reason: str, timeout: int = 160) -> tuple[bool,
             check=False,
         )
         if result.returncode != 0:
+            stderr = result.stderr.strip()
+            lowered = stderr.lower()
+            # Expected, non-fatal: the corpus contains docs/images that need
+            # semantic extraction but no LLM API key is configured. Treat this
+            # as a clean no-op instead of emitting a failure on every hook
+            # event. Configure a key (or AGENT_OS_GRAPHIFY_ARGS="--backend ...")
+            # to enable semantic extraction.
+            if "no llm api key" in lowered or "code-only corpus needs no key" in lowered:
+                dirty_path(root).unlink(missing_ok=True)
+                fingerprint_path(root).write_text(git_state_fingerprint(root), encoding="utf-8")
+                message = (
+                    f"Graphify semantic extraction skipped ({reason}): no LLM API key "
+                    "configured. Set an API key or AGENT_OS_GRAPHIFY_ARGS to enable."
+                )
+                log(root, message)
+                return True, message
             message = (
                 f"Graphify baseline update failed ({reason}); "
-                f"exit={result.returncode}; stderr={result.stderr.strip()}"
+                f"exit={result.returncode}; stderr={stderr}"
             )
             log(root, message)
             return False, message
