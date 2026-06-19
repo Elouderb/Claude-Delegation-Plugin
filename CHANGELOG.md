@@ -4,6 +4,19 @@ All notable changes to the **agent-os** plugin are documented here. The format i
 based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/), and this project
 adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.1.8] - 2026-06-19
+
+### Fixed
+- **Graph refresh errored on code-deleting refactors:** all three graphify
+  refresh sites — `graphify_command()` in `scripts/hook_common.py`, the
+  `graph_refresh` MCP tool in `mcp/server.py`, and the `/<slug>/refresh/repo`
+  route in `mcp/db_tools/app.py` — now run `graphify update . --force`. Without
+  `--force`, graphify refuses to overwrite `graph.json` when a rebuild produces
+  fewer nodes (e.g. after a refactor that deletes code), so the refresh reported
+  an error and the graph went stale. `--force` overwrites in that case, keeping
+  incremental refresh reliable. The `AGENT_OS_GRAPHIFY_ARGS` escape hatch still
+  appends after the flag.
+
 ## [0.1.7] - 2026-06-19
 
 ### Fixed
