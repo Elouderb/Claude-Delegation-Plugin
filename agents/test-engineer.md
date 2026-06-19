@@ -3,6 +3,7 @@ name: test-engineer
 description: Use proactively to create, improve, or execute tests after implementation, especially for behavior changes, bug fixes, database work, APIs, and complex integrations.
 model: sonnet
 tools:
+  - Skill
   - Read
   - Edit
   - Write

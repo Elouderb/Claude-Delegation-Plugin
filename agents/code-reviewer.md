@@ -3,6 +3,7 @@ name: code-reviewer
 description: Use automatically after an implementation agent finishes. Reviews the diff against the card, architecture, repository graph, database graph, and acceptance criteria.
 model: sonnet
 tools:
+  - Skill
   - Read
   - Grep
   - Glob

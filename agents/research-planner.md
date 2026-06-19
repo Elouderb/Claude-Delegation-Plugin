@@ -3,6 +3,7 @@ name: research-planner
 description: Use when requirements, architecture, external APIs, unfamiliar libraries, or implementation choices need investigation before coding begins.
 model: sonnet
 tools:
+  - Skill
   - Read
   - Grep
   - Glob
