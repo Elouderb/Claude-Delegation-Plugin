@@ -8,9 +8,28 @@ from pathlib import Path
 from flask import Flask, Response, jsonify, redirect, send_from_directory, url_for
 from dotenv import load_dotenv
 
-BASE_DIR = Path(__file__).resolve().parent.parent
-DB_GRAPH_DIR = BASE_DIR / ".agent-os" / "db"
-CODE_GRAPH_DIR = BASE_DIR / "graphify-out"
+SCRIPT_DIR = Path(__file__).resolve().parent  # mcp/db_tools — location of the build scripts
+
+
+def _repo_root() -> Path:
+    """Resolve the repository this graph server serves.
+
+    Walk up from the current working directory to the nearest .git. app.py is
+    launched with cwd set to the repo root, so .env and graph data are read from
+    the local repository being worked in, never from the plugin install dir.
+    """
+    current = Path.cwd().resolve()
+    search = current
+    while search != search.parent:
+        if (search / ".git").exists():
+            return search
+        search = search.parent
+    return current
+
+
+REPO_ROOT = _repo_root()
+DB_GRAPH_DIR = REPO_ROOT / ".agent-os" / "db"
+CODE_GRAPH_DIR = REPO_ROOT / "graphify-out"
 
 # Database graph files
 DB_GRAPH_HTML = DB_GRAPH_DIR / "db_graph.html"
@@ -23,10 +42,10 @@ CODE_GRAPH_HTML = CODE_GRAPH_DIR / "graph.html"
 CODE_GRAPH_JSON = CODE_GRAPH_DIR / "graph.json"
 CODE_GRAPH_REPORT = CODE_GRAPH_DIR / "GRAPH_REPORT.md"
 
-BUILD_SCRIPT = BASE_DIR / "db_tools" / "build_db_graph.py"
-VISUALIZE_SCRIPT = BASE_DIR / "db_tools" / "build_graph_html.py"
+BUILD_SCRIPT = SCRIPT_DIR / "build_db_graph.py"
+VISUALIZE_SCRIPT = SCRIPT_DIR / "build_graph_html.py"
 
-load_dotenv(BASE_DIR / ".env")
+load_dotenv(REPO_ROOT / ".env")
 app = Flask(__name__)
 
 @app.get("/")
@@ -161,12 +180,12 @@ def refresh_db():
     try:
         build = subprocess.run(
             [sys.executable, str(BUILD_SCRIPT)],
-            cwd=BASE_DIR, capture_output=True, text=True,
+            cwd=REPO_ROOT, capture_output=True, text=True,
             timeout=120, check=True
         )
         visualize = subprocess.run(
             [sys.executable, str(VISUALIZE_SCRIPT)],
-            cwd=BASE_DIR, capture_output=True, text=True,
+            cwd=REPO_ROOT, capture_output=True, text=True,
             timeout=120, check=True
         )
     except subprocess.TimeoutExpired:
@@ -191,7 +210,7 @@ def refresh_repo():
     try:
         result = subprocess.run(
             ["graphify", "--update"],
-            cwd=BASE_DIR, capture_output=True, text=True,
+            cwd=REPO_ROOT, capture_output=True, text=True,
             timeout=300, check=True
         )
     except FileNotFoundError:
