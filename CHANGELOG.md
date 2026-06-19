@@ -4,6 +4,33 @@ All notable changes to the **agent-os** plugin are documented here. The format i
 based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/), and this project
 adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.1.5] - 2026-06-19
+
+### Fixed
+- **Graph server path (blocker):** `start_graph_server()` in `mcp/server.py` now
+  locates `app.py` plugin-relative (`Path(__file__).resolve().parent / "db_tools" /
+  "app.py"`) instead of searching the user's repo root. Previously, the Flask graph
+  UI would silently never start for any externally installed user.
+- **Graphify refresh invocation (blocker):** Both the `graph_refresh` MCP tool in
+  `mcp/server.py` and the `/refresh/repo` route in `mcp/db_tools/app.py` now call
+  `["graphify", ".", "--update"]` (the `.` path argument was missing in both,
+  inconsistent with `hook_common.py`'s `graphify_command()`).
+- **Installer (blocker):** `installer/install.sh` post-install text now describes
+  the canonical `/plugin marketplace add` + `/plugin install` + `/reload-plugins`
+  flow instead of the obsolete manual MCP settings path.
+- **`datetime.utcnow()` deprecation:** All four call sites in `server.py` (`create_card`,
+  `update_card`, `add_comment`, `format_graph_response`) now use
+  `datetime.now(timezone.utc)` (Python 3.12+).
+- **`graph_search_nodes` truncation flag:** `truncated = len(nodes) > limit` corrected
+  to `len(results) >= limit` — the old check tested the unfiltered node count, not
+  whether the result set was actually capped.
+- **`_graph_port()` `PORT` fallback removed:** The function no longer falls back to
+  the `PORT` environment variable (claimed by Heroku, Railway, Render, etc.), which
+  could silently redirect the graph UI to an unrelated port.
+- **`mcp` version pin tightened:** `mcp>=0.1.0` → `mcp>=1.0,<2` (tested against
+  1.27.1; prevents silent adoption of a hypothetical breaking 2.x release).
+- **README version string:** First-paragraph version updated from `0.1.1` to `0.1.5`.
+
 ## [0.1.4] - 2026-06-18
 
 ### Fixed

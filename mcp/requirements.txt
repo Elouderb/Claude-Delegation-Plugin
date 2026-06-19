@@ -2,7 +2,7 @@
 #
 # Core: required for the card tools and code-graph tools. The server imports
 # FastMCP from `mcp.server.fastmcp`, so only the `mcp` package is needed.
-mcp>=0.1.0
+mcp>=1.0,<2
 
 # Optional: only needed if you use the database-graph tools (db_* / the
 # mcp/db_tools/ Flask viewer), which connect to Microsoft SQL Server.

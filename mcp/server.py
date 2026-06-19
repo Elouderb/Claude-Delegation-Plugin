@@ -7,7 +7,7 @@ Repository-local task cards with status tracking and work logs.
 import os
 import json
 import sys
-from datetime import datetime
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Optional, List, Dict, Any
 import sqlite3
@@ -112,8 +112,8 @@ def ensure_agent_os():
 
 
 def _graph_port() -> int:
-    """Port for the Flask graph UI. Override with AGENT_OS_GRAPH_PORT (or PORT)."""
-    return int(os.getenv("AGENT_OS_GRAPH_PORT") or os.getenv("PORT") or "5000")
+    """Port for the Flask graph UI. Override with AGENT_OS_GRAPH_PORT (default 5000)."""
+    return int(os.getenv("AGENT_OS_GRAPH_PORT") or "5000")
 
 
 def _port_in_use(port: int) -> bool:
@@ -144,20 +144,9 @@ def start_graph_server():
             log(f"Graph server already running on port {port}; reusing it.")
             return
 
-        # Check multiple possible locations for app.py
-        possible_paths = [
-            repo_root / "mcp" / "db_tools" / "app.py",  # Installed in mcp/db_tools
-            repo_root / "db_tools" / "app.py",          # Installed at repo root
-        ]
-
-        app_path = None
-        for path in possible_paths:
-            if path.exists():
-                app_path = path
-                break
-
-        if not app_path:
-            log(f"WARNING: Graph server app not found. Searched: {[str(p) for p in possible_paths]}")
+        app_path = Path(__file__).resolve().parent / "db_tools" / "app.py"
+        if not app_path.exists():
+            log(f"WARNING: Graph server app not found at {app_path}")
             return
 
         # Start Flask server with stdout/stderr captured for error diagnostics.
@@ -338,7 +327,7 @@ def format_graph_response(graph_type: str, query: Dict, results: Dict,
     """Format response in standard graph tool response format."""
     return {
         "graph": graph_type,
-        "generated_at": datetime.utcnow().isoformat(),
+        "generated_at": datetime.now(timezone.utc).isoformat(),
         "query": query,
         "results": results,
         "warnings": warnings or [],
@@ -399,7 +388,7 @@ def graph_search_nodes(query: str, graph: str = "code", node_type: Optional[str]
             if len(results) >= limit:
                 break
 
-        truncated = len(nodes) > limit
+        truncated = len(results) >= limit
         return format_graph_response(graph, {"query": query, "type": node_type},
                                     {"nodes": results}, truncated=truncated)
     except Exception as e:
@@ -631,7 +620,7 @@ def graph_refresh(graph: str = "code") -> dict:
             try:
                 repo_root = get_repo_root()
                 result = subprocess.run(
-                    ["graphify", "--update"],
+                    ["graphify", ".", "--update"],
                     cwd=repo_root,
                     check=True,
                     capture_output=True,
@@ -1185,7 +1174,7 @@ def create_card(title: str, description: Optional[str] = None, priority: str = "
             raise RuntimeError("Database not initialized. Server may not have started properly.")
 
         card_id = str(uuid.uuid4())[:8]
-        now = datetime.utcnow().isoformat()
+        now = datetime.now(timezone.utc).isoformat()
 
         cursor = db_conn.cursor()
         cursor.execute("""
@@ -1319,7 +1308,7 @@ def update_card(card_id: str, title: Optional[str] = None,
             return {"error": "No fields to update"}
 
         updates.append("updated_at = ?")
-        params.append(datetime.utcnow().isoformat())
+        params.append(datetime.now(timezone.utc).isoformat())
         params.append(card_id)
 
         query = f"UPDATE cards SET {', '.join(updates)} WHERE card_id = ?"
@@ -1350,7 +1339,7 @@ def add_comment(card_id: str, author: str, comment: str) -> dict:
             log(f"Card not found for comment: {card_id}")
             return {"error": f"Card {card_id} not found"}
 
-        now = datetime.utcnow().isoformat()
+        now = datetime.now(timezone.utc).isoformat()
 
         cursor.execute("""
         INSERT INTO card_comments (card_id, author, comment, created_at)

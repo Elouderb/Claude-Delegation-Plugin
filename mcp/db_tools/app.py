@@ -209,7 +209,7 @@ def refresh_db():
 def refresh_repo():
     try:
         result = subprocess.run(
-            ["graphify", "--update"],
+            ["graphify", ".", "--update"],
             cwd=REPO_ROOT, capture_output=True, text=True,
             timeout=300, check=True
         )
