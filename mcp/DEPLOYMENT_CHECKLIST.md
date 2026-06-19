@@ -87,6 +87,37 @@ The manifest, MCP server, hooks, agents, and skills are auto-discovered. Because
 
 ---
 
+## Releasing Changes (version-bump discipline)
+
+**The plugin cache is keyed by version.** When you change any packaged file that
+affects runtime — agent and skill definitions (`agents/`, `skills/`), hooks
+(`hooks/hooks.json`, `scripts/`), the MCP server and graph tooling (`mcp/*.py`,
+`mcp/db_tools/`, `mcp/requirements.txt`), or the manifests (`.claude-plugin/`,
+`.mcp.json`) — you **must** bump `version` in `.claude-plugin/plugin.json` in the
+same change. Documentation-only changes (`*.md`, including the docs under `mcp/`)
+do not require a bump, since they don't affect the running plugin.
+
+If you don't, `/plugin install` sees the unchanged version, reports *"already at
+the latest version"*, and keeps serving the **stale cached copy** — your changes
+never reach the running plugin even after `/reload-plugins`.
+
+To ship a change:
+1. Edit the files, **and** bump `.claude-plugin/plugin.json` `version` (+ add a
+   `CHANGELOG.md` entry).
+2. Refresh the install:
+   ```bash
+   /plugin marketplace update agent-os-local
+   /plugin install agent-os@agent-os-local
+   /reload-plugins
+   ```
+3. Confirm the cache updated — a new version dir should exist under
+   `~/.claude/plugins/cache/agent-os-local/agent-os/<version>/`.
+
+For tight iteration without bumping each time, use
+`claude --plugin-dir /path/to/agent-os`, which live-loads from the source tree.
+
+---
+
 ## Verification After Deployment
 
 1. **Dependencies Install Cleanly**
@@ -120,7 +151,10 @@ The manifest, MCP server, hooks, agents, and skills are auto-discovered. Because
 
 If issues arise after deployment:
 
-1. **Quick Fix**: Update just `mcp/server.py` (no reinstall needed for code edits).
+1. **Quick Fix**: Editing the *source* tree requires a version bump + reinstall to
+   reach the running plugin (see "Releasing Changes" above); only edits to the
+   installed cache copy under `~/.claude/plugins/cache/.../<version>/` take effect
+   without a reinstall.
 2. **Rollback**: `/plugin uninstall agent-os@agent-os-local`
 3. **Check Logs**: Look for the server's stderr output in Claude Code logs.
 4. **Report**: Open an issue with the error output and logs.
