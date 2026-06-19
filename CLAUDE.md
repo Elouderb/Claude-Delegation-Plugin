@@ -1,6 +1,6 @@
 # Task Cards MCP Server
 
-Jira-style task management system for Claude Code and AI agents. Repository-local, SQLite-backed, FastMCP-based.
+Jira-style task management system for Claude Code and AI agents. Repository-local, SQLite-backed, built on the `mcp` Python package.
 
 ## What This Is
 
@@ -10,7 +10,7 @@ A lightweight task/card management system designed as an MCP server. It provides
 - **Simple card lifecycle**: Created → In Progress → Complete
 - **Work logs**: Comment system for tracking progress
 - **Flexible filtering**: Query cards by status or priority
-- **Zero external dependencies**: Pure SQLite + FastMCP
+- **Card subsystem has zero external dependencies**: pure SQLite, no external services. The optional database-graph subsystem has extra dependencies (`pyodbc` plus a live SQL Server) and is not required to use cards.
 
 ## Installation
 
@@ -182,5 +182,5 @@ Future features (not in scope yet):
 
 - Cards are repository-local; each repo has its own database
 - The MCP server auto-initializes the database on first connection
-- No external services required
+- The card subsystem requires no external services; the optional database-graph subsystem does (`pyodbc` + a live SQL Server)
 - Safe to commit `.agent-os/` to version control (or use `.gitignore`)

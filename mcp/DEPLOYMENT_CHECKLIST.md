@@ -1,59 +1,63 @@
-# Deployment Checklist - Move to Plugins Folder
+# Deployment Checklist
 
-## Pre-Deployment Verification ✅
+## Pre-Deployment Verification
 
 ### Code Quality
-- [x] Python syntax valid (verified with py_compile)
-- [x] All unit tests passing (8/8)
-- [x] No linting errors (imports clean, standard library usage)
+- [x] Python syntax valid (verified with `py_compile`)
+- [x] Card unit tests passing (8/8)
 - [x] No hardcoded absolute paths
-- [x] No relative path traversals
+- [x] `.mcp.json` uses `${CLAUDE_PLUGIN_ROOT}` (portable)
 
 ### Documentation
-- [x] README.md - Quick start guide present
-- [x] CLAUDE.md - Comprehensive tool documentation
-- [x] INTEGRATION.md - Setup instructions
-- [x] PROJECT_SUMMARY.md - Complete feature overview
-- [x] FIXES_APPLIED.md - Change documentation
-- [x] This checklist - Deployment verification
+- [x] `README.md` — install and overview
+- [x] `CLAUDE.md` — tool documentation
+- [x] `PROJECT_SUMMARY.md` — card subsystem summary
+- [x] `CHANGELOG.md` — version history
+- [x] This checklist — deployment verification
 
 ### Dependencies
-- [x] requirements.txt created with mcp, fastmcp
-- [x] All imports verified (FastMCP loads correctly)
-- [x] No missing dependencies
+- [x] `mcp/requirements.txt` ships `mcp` only
+- [x] Database-graph subsystem deps (`pyodbc` + live SQL Server + `.env`
+      `DB_CONNECTION_STRING`) are optional
 
 ### Portability
-- [x] Repo discovery via .git (auto-detects root)
-- [x] .agent-os created at repo root (auto-isolated)
-- [x] Path resolution handles multiple layouts
-- [x] Works with any project structure
+- [x] Repo discovery via `.git` (auto-detects root)
+- [x] `.agent-os/` created at repo root (auto-isolated)
+- [x] Build scripts located at runtime via `find_db_tools_dir()`
 
 ### Error Handling & Observability
+- [x] MCP server logs to stderr (does not corrupt the stdio protocol)
 - [x] Graph server health monitoring
 - [x] Startup failure detection & logging
 - [x] Graceful degradation when optional services unavailable
-- [x] Comprehensive error messages for debugging
 
 ---
 
 ## Plugin Layout
 
-This is a Claude Code plugin. The full plugin root contains:
+This is a Claude Code plugin (`agent-os`). The full plugin root contains:
 
 ```
 agent-os/
-├── .claude-plugin/plugin.json   ← Plugin manifest (required)
+├── .claude-plugin/
+│   ├── plugin.json              ← Plugin manifest (required)
+│   └── marketplace.json         ← Local marketplace definition
 ├── .mcp.json                    ← MCP server config (uses ${CLAUDE_PLUGIN_ROOT})
-├── hooks/hooks.json             ← Graph-sync + file-protection hooks
+├── hooks/
+│   ├── hooks.json               ← Graph-sync + file-protection hooks
+│   └── README.md
 ├── scripts/                     ← Hook implementations
 ├── agents/                      ← 5 delegation agents
 ├── skills/                      ← 17 workflow skills
+├── templates/                   ← Card / workflow templates
+├── installer/                   ← Setup helpers (install.sh, etc.)
 └── mcp/
     ├── server.py                ← MCP server (cards + 18 graph tools)
     ├── test_server.py           ← Card test suite (8/8 passing)
-    ├── requirements.txt         ← Dependencies
+    ├── requirements.txt         ← Dependencies (mcp only)
+    ├── example_usage.py         ← Usage examples
     └── db_tools/                ← Optional SQL Server graph builder
-        ├── app.py
+        ├── app.py               ← Flask graph UI (port 5000, AGENT_OS_GRAPH_PORT)
         ├── build_db_graph.py
         └── build_graph_html.py
 ```
@@ -67,56 +71,48 @@ agent-os/
 pip install -r mcp/requirements.txt
 ```
 
-### Step 2: Load the plugin in Claude Code
+### Step 2: Install the plugin in Claude Code
 ```bash
-claude --plugin-dir /path/to/agent-os
+/plugin marketplace add /path/to/agent-os
+/plugin install agent-os@agent-os-local
 ```
 The manifest, MCP server, hooks, agents, and skills are auto-discovered. Because
 `.mcp.json` uses `${CLAUDE_PLUGIN_ROOT}`, no path editing is required.
 
-### Step 3: Verify
-- `claude plugin validate /path/to/agent-os` should pass.
-- The `task-cards` MCP tools should appear in the MCP tools list.
+(`claude --plugin-dir /path/to/agent-os` is a dev-only alternative.)
 
-### Step 4: Start Using
-```python
-# In Claude Code, agents can now use:
-create_card(title="...", priority="high")
-list_cards(status="In Progress")
-get_card(card_id)
-# ... etc
-```
+### Step 3: Verify
+- The `task-cards` MCP tools should appear in the MCP tools list.
+- All 6 card management tools should be functional.
 
 ---
 
 ## Verification After Deployment
 
-After moving to plugins folder, verify:
-
 1. **Dependencies Install Cleanly**
    ```bash
-   pip install -r requirements.txt  # Should complete without errors
+   pip install -r mcp/requirements.txt
    ```
 
 2. **Server Starts Without Errors**
    ```bash
-   python3 server.py  # Should initialize database and start cleanly
+   python3 mcp/server.py   # initializes database, logs to stderr, serves over stdio
    ```
 
-3. **Tests Pass in New Location**
+3. **Tests Pass**
    ```bash
-   python3 test_server.py  # All 8 tests should pass
+   python3 mcp/test_server.py   # all 8 card tests should pass
    ```
 
 4. **Repo Discovery Works**
-   - Server correctly finds .git and creates .agent-os
-   - Database created at repo root/.agent-os/cards.sqlite
+   - Server finds `.git` and creates `.agent-os/`
+   - Database created at `<repo root>/.agent-os/cards.sqlite`
    - Cards are per-repository
 
 5. **Tools Are Available**
-   - In Claude Code: task-cards tools appear in MCP tools list
+   - `task-cards` tools appear in the MCP tools list
    - All 6 card management tools functional
-   - Graph tools functional (if graphify/db_tools available)
+   - Graph tools functional (if graphify / db_tools available)
 
 ---
 
@@ -124,23 +120,10 @@ After moving to plugins folder, verify:
 
 If issues arise after deployment:
 
-1. **Quick Fix**: Update just `server.py` without reinstalling
-2. **Rollback**: Remove plugin folder: `rm -rf ~/.claude/plugins/task-cards`
-3. **Check Logs**: Look for error messages in Claude Code logs
-4. **Report**: Create issue with error output and logs
-
----
-
-## Success Criteria ✅
-
-- [x] Plugin structure is self-contained
-- [x] No external dependencies beyond mcp/fastmcp
-- [x] Works with existing Claude Code setup
-- [x] Repository-local storage (not shared/global)
-- [x] All tests pass without modification
-- [x] Documentation is complete
-- [x] Error messages are user-friendly
-- [x] Setup is one-time per project
+1. **Quick Fix**: Update just `mcp/server.py` (no reinstall needed for code edits).
+2. **Rollback**: `/plugin uninstall agent-os@agent-os-local`
+3. **Check Logs**: Look for the server's stderr output in Claude Code logs.
+4. **Report**: Open an issue with the error output and logs.
 
 ---
 
@@ -152,6 +135,5 @@ If issues arise after deployment:
   loads and passes `claude plugin validate`.
 - The **database-graph subsystem** is optional: it requires a live SQL Server and
   a configured `.env`, and it refreshes synchronously (can block up to ~60s per
-  `db_*` call). See `FIXES_APPLIED.md` (2026-06-18) for the current change history
-  and known limitations.
-
+  `db_*` call). See `CHANGELOG.md` for the current change history and known
+  limitations.

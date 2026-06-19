@@ -20,6 +20,11 @@ graphify . --update
 
 It never adds semantic, deep, force, or LLM-deduplication flags.
 
+`graphify` must be on your `PATH` for these hooks to do anything. When no LLM API
+key is configured, Graphify's semantic-extraction step is skipped quietly and the
+baseline structural update still runs. You can pass additional flags to the
+update via the `AGENT_OS_GRAPHIFY_ARGS` environment variable.
+
 The repository graph is marked dirty when Claude creates or modifies a relevant
 source file. It is updated at bounded lifecycle points:
 
@@ -97,7 +102,15 @@ After placing this into the plugin, run:
 claude plugin validate .
 ```
 
-Then load the plugin and inspect active hooks with:
+Then install the plugin via the local marketplace (see the project `README.md`
+for the canonical flow):
+
+```text
+/plugin marketplace add /path/to/agent-os
+/plugin install agent-os@agent-os-local
+```
+
+After `/reload-plugins` (or a restart), inspect active hooks with:
 
 ```text
 /hooks
