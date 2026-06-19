@@ -4,18 +4,36 @@ All notable changes to the **agent-os** plugin are documented here. The format i
 based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/), and this project
 adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [Unreleased]
+## [0.1.2] - 2026-06-18
 
 ### Added
-- Agent tool-scoping: each delegation agent now declares an explicit tool
-  allowlist instead of inheriting all tools.
-- Skill wiring: agents reference their preload skills so the right workflow
-  guidance loads automatically.
+- Agent tool-scoping: each delegation agent now declares an explicit `tools:`
+  allowlist instead of inheriting every tool. Read-only agents (code-reviewer,
+  research-planner) no longer have Edit/Write; no subagent has
+  `complete_card`/`graph_refresh` (lead-only).
+- Skill wiring: every agent body now loads its preload skills via the Skill tool
+  and restates its hard guardrails.
+- `AGENT_OS_GRAPHIFY_ARGS` env var to pass extra flags (e.g. a backend) to the
+  graph-sync `graphify` invocation.
 
 ### Changed
-- Bumped agent model assignments to current model tiers.
-- `graphify` now degrades gracefully — when its inputs or outputs are missing it
-  skips cleanly instead of erroring.
+- Agent models: `implementer`, `research-planner`, and `test-engineer` promoted
+  from `haiku` to `sonnet` (the cheapest tier was doing the hardest work).
+- `requirements-to-cards` and `test-execution-reporting` skills now name the exact
+  MCP tool IDs they depend on.
+- Documentation overhaul: canonical marketplace install across README /
+  INTEGRATION / DEPLOYMENT_CHECKLIST; `templates/CLAUDE.md` made portable
+  (database-graph section gated optional, lead model de-named, plugin skills
+  referenced, trimmed ~11KB→~7KB); documented the graph UI + `AGENT_OS_GRAPH_PORT`,
+  artifact locations, the `graphify` dependency, and stderr logging.
+
+### Fixed
+- Graph-sync hooks no longer fail on every event: `refresh_graphify` treats the
+  "no LLM API key" case as a clean no-op instead of emitting a failure banner.
+
+### Removed
+- Dev-scratch docs `outline.md` and `mcp/FIXES_APPLIED.md` (history now lives in
+  this changelog).
 
 ## [0.1.1] - 2026-06-18
 
