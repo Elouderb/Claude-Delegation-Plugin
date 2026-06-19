@@ -4,6 +4,19 @@ All notable changes to the **agent-os** plugin are documented here. The format i
 based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/), and this project
 adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.1.9] - 2026-06-19
+
+### Changed
+- **Graph-server navigation pages restyled (dark mode):** the home page,
+  per-repo page, task-cards view, and error pages in `mcp/db_tools/app.py` now
+  share one dark theme. Extracted the three duplicated light-mode `<style>`
+  blocks into a single `_PAGE_CSS` constant and a `_page()` wrapper helper;
+  repos render as cards on the home page, task statuses as colored pill badges.
+  The graphify/db graph pages themselves are generated externally and are
+  unchanged. XSS escaping (`escape` for HTML text, `urllib.parse.quote` for
+  URL/JS contexts) is preserved throughout; `_missing_file` now URL-encodes the
+  slug in its back-link.
+
 ## [0.1.8] - 2026-06-19
 
 ### Fixed
