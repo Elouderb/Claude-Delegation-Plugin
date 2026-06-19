@@ -33,9 +33,14 @@ VALID_STATUSES = ("Created", "In Progress", "Complete")
 
 
 def log(message: str):
-    """Log a message to stdout with timestamp."""
+    """Log a message to stderr with timestamp.
+
+    Must be stderr, not stdout: the MCP stdio transport speaks JSON-RPC over
+    stdout, so any stdout writes corrupt the protocol stream and break the
+    client handshake. Claude Code captures stderr as plugin logs.
+    """
     timestamp = datetime.now().isoformat()
-    print(f"[{timestamp}] {message}", file=sys.stdout, flush=True)
+    print(f"[{timestamp}] {message}", file=sys.stderr, flush=True)
 
 
 def ensure_agent_os():
@@ -106,11 +111,38 @@ def ensure_agent_os():
         raise
 
 
+def _graph_port() -> int:
+    """Port for the Flask graph UI. Override with AGENT_OS_GRAPH_PORT (or PORT)."""
+    return int(os.getenv("AGENT_OS_GRAPH_PORT") or os.getenv("PORT") or "5000")
+
+
+def _port_in_use(port: int) -> bool:
+    """Return True if something is already listening on 127.0.0.1:<port>."""
+    import socket
+
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
+        sock.settimeout(0.25)
+        return sock.connect_ex(("127.0.0.1", port)) == 0
+
+
 def start_graph_server():
-    """Start the Flask graph server in a subprocess."""
+    """Start the Flask graph server in a subprocess.
+
+    Claude Code spawns a separate MCP server process for the main loop and for
+    each subagent, so multiple instances would otherwise collide on the graph
+    UI's single TCP port and leak orphan processes. If the port is already
+    serving, we reuse the existing instance instead of spawning a duplicate.
+    The port is configurable via AGENT_OS_GRAPH_PORT (default 5000).
+    """
     global flask_process
     try:
         repo_root = get_repo_root()
+        port = _graph_port()
+
+        # A sibling MCP instance (or a prior run) may already host the graph UI.
+        if _port_in_use(port):
+            log(f"Graph server already running on port {port}; reusing it.")
+            return
 
         # Check multiple possible locations for app.py
         possible_paths = [
@@ -128,21 +160,20 @@ def start_graph_server():
             log(f"WARNING: Graph server app not found. Searched: {[str(p) for p in possible_paths]}")
             return
 
-        # Start Flask server with stdout/stderr captured for error diagnostics
+        # Start Flask server with stdout/stderr captured for error diagnostics.
+        # Propagate the chosen port so app.py binds where we expect.
         flask_process = subprocess.Popen(
             [sys.executable, str(app_path)],
             cwd=repo_root,
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
             text=True,
-            bufsize=1
+            bufsize=1,
+            env={**os.environ, "PORT": str(port)},
         )
 
         log(f"Graph server started (PID: {flask_process.pid}) at {app_path}")
-        log("📊 Graphs available at:")
-        log("   - Database: http://localhost:5000/db_graph")
-        log("   - Repository: http://localhost:5000/repo_graph")
-        log("   - Home: http://localhost:5000/")
+        log(f"📊 Graphs available at http://localhost:{port}/ (db_graph, repo_graph)")
 
     except Exception as e:
         log(f"ERROR starting graph server: {e}")
