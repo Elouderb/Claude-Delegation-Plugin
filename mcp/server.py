@@ -116,6 +116,35 @@ def _graph_port() -> int:
     return int(os.getenv("AGENT_OS_GRAPH_PORT") or "5000")
 
 
+_REPO_REGISTRY = Path.home() / ".agent-os" / "active_repos.json"
+
+
+def _register_repo(repo_root: Path) -> str:
+    """Write repo_root into the shared registry and return its URL slug.
+
+    The slug is the repo directory name. If two repos share a name the
+    parent directory is prepended (e.g. ``parent-reponame``) so slugs stay
+    unique and human-readable.
+    """
+    slug = repo_root.name
+    _REPO_REGISTRY.parent.mkdir(parents=True, exist_ok=True)
+    try:
+        registry: dict = json.loads(_REPO_REGISTRY.read_text()) if _REPO_REGISTRY.exists() else {}
+    except Exception:
+        registry = {}
+
+    existing = registry.get(slug)
+    if existing and existing != str(repo_root):
+        slug = f"{repo_root.parent.name}-{repo_root.name}"
+
+    registry[slug] = str(repo_root)
+    try:
+        _REPO_REGISTRY.write_text(json.dumps(registry, indent=2))
+    except Exception:
+        pass
+    return slug
+
+
 def _port_in_use(port: int) -> bool:
     """Return True if something is already listening on 127.0.0.1:<port>."""
     import socket
@@ -137,11 +166,13 @@ def start_graph_server():
     global flask_process
     try:
         repo_root = get_repo_root()
+        slug = _register_repo(repo_root)
         port = _graph_port()
 
         # A sibling MCP instance (or a prior run) may already host the graph UI.
         if _port_in_use(port):
             log(f"Graph server already running on port {port}; reusing it.")
+            log(f"📊 Graphs available at http://localhost:{port}/{slug}/ (code_graph, db_graph, task_cards)")
             return
 
         app_path = Path(__file__).resolve().parent / "db_tools" / "app.py"
@@ -162,7 +193,7 @@ def start_graph_server():
         )
 
         log(f"Graph server started (PID: {flask_process.pid}) at {app_path}")
-        log(f"📊 Graphs available at http://localhost:{port}/ (db_graph, repo_graph)")
+        log(f"📊 Graphs available at http://localhost:{port}/{slug}/ (code_graph, db_graph, task_cards)")
 
     except Exception as e:
         log(f"ERROR starting graph server: {e}")
@@ -620,7 +651,7 @@ def graph_refresh(graph: str = "code") -> dict:
             try:
                 repo_root = get_repo_root()
                 result = subprocess.run(
-                    ["graphify", ".", "--update"],
+                    ["graphify", "update", "."],
                     cwd=repo_root,
                     check=True,
                     capture_output=True,
