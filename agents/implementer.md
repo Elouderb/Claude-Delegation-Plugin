@@ -3,6 +3,7 @@ name: implementer
 description: Use proactively to implement a clearly scoped card when architecture and acceptance criteria are already defined. Appropriate for features, bug fixes, refactors, integrations, and documentation changes. Do not use for unresolved architecture decisions.
 model: sonnet
 tools:
+  - Skill
   - Read
   - Edit
   - Write

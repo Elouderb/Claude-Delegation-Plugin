@@ -4,6 +4,14 @@ All notable changes to the **agent-os** plugin are documented here. The format i
 based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/), and this project
 adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.1.3] - 2026-06-18
+
+### Fixed
+- Agents could not load their wired skills: the scoped `tools:` allowlists added
+  in 0.1.2 omitted the `Skill` tool, so the "load these skills" instructions in
+  the agent bodies were inert. Added `Skill` to all five agents' tool lists.
+  (Found by running the read-only `code-reviewer` agent as a live config check.)
+
 ## [0.1.2] - 2026-06-18
 
 ### Added

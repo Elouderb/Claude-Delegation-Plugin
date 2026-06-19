@@ -3,6 +3,7 @@ name: database-engineer
 description: Use for schema changes, migrations, SQL queries, stored procedures, functions, indexes, foreign keys, and any task whose impact crosses database objects.
 model: sonnet
 tools:
+  - Skill
   - Read
   - Edit
   - Write
