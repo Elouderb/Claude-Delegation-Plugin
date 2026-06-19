@@ -4,6 +4,18 @@ All notable changes to the **agent-os** plugin are documented here. The format i
 based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/), and this project
 adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.1.4] - 2026-06-18
+
+### Fixed
+- Graph UI (`mcp/db_tools/app.py`) now reads `.env` and graph data from the
+  **local repository** instead of the plugin install directory. `BASE_DIR`
+  (`Path(__file__).parent.parent`) resolved to the plugin's `mcp/` dir, so the
+  Flask UI loaded `DB_CONNECTION_STRING` from the plugin's `.env` and looked for
+  graphs under `<plugin>/mcp/.agent-os/db` / `graphify-out`. Split into
+  `SCRIPT_DIR` (build-script location) and a cwd/`.git`-derived `REPO_ROOT` used
+  for `.env`, the graph directories, and the refresh subprocess `cwd`. The `db_*`
+  MCP build path (`build_db_graph.py`) was already repo-local; this aligns the UI.
+
 ## [0.1.3] - 2026-06-18
 
 ### Fixed
