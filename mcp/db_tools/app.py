@@ -348,7 +348,7 @@ def refresh_repo(slug: str):
         return jsonify({"error": f"Repo '{slug}' not found"}), 404
     try:
         result = subprocess.run(
-            ["graphify", "update", "."],
+            ["graphify", "update", ".", "--force"],
             cwd=repo_root, capture_output=True, text=True,
             timeout=300, check=True,
         )

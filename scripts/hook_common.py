@@ -132,8 +132,10 @@ def graphify_command(root: Path) -> list[str]:
     # Baseline incremental, code-only update. The `update <path>` subcommand
     # rebuilds graph.json without an LLM key; the older `. --update` form fell
     # into the semantic-extraction path, which errors out with no API key and
-    # never rebuilds the graph.
-    command = [executable, "update", "."]
+    # never rebuilds the graph. `--force` overwrites graph.json even when the
+    # rebuild has fewer nodes — without it, refactors that delete code make
+    # graphify refuse the write and the hook reports an error.
+    command = [executable, "update", ".", "--force"]
     # Allow extra args without code changes, e.g.
     # AGENT_OS_GRAPHIFY_ARGS="--backend ollama" to enable semantic extraction.
     extra = os.getenv("AGENT_OS_GRAPHIFY_ARGS")

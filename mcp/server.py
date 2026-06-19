@@ -651,7 +651,7 @@ def graph_refresh(graph: str = "code") -> dict:
             try:
                 repo_root = get_repo_root()
                 result = subprocess.run(
-                    ["graphify", "update", "."],
+                    ["graphify", "update", ".", "--force"],
                     cwd=repo_root,
                     check=True,
                     capture_output=True,
