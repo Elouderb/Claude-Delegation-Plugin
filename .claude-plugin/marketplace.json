@@ -1,0 +1,19 @@
+{
+  "$schema": "https://anthropic.com/claude-code/marketplace.schema.json",
+  "name": "agent-os-local",
+  "description": "Local marketplace for the Agent OS plugin (task cards + repo/database knowledge-graph tools).",
+  "owner": {
+    "name": "Elouderb"
+  },
+  "plugins": [
+    {
+      "name": "agent-os",
+      "description": "Repository-local Agent OS: Jira-style task cards (SQLite MCP server), repository/database knowledge-graph tools, graph-sync hooks, and a delegation-oriented set of agents and skills for Claude Code.",
+      "author": {
+        "name": "Elouderb"
+      },
+      "category": "development",
+      "source": "./"
+    }
+  ]
+}

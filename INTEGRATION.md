@@ -14,6 +14,34 @@ This auto-discovers the manifest, MCP server (`.mcp.json`), hooks, agents, and
 skills. Because `.mcp.json` uses `${CLAUDE_PLUGIN_ROOT}`, nothing needs editing per
 machine. Run `claude plugin validate /path/to/agent-os` to confirm it loads.
 
+### Gotcha: developing this plugin inside its own repository
+
+`.mcp.json` intentionally references `${CLAUDE_PLUGIN_ROOT}/mcp/server.py`. That
+variable is only injected when the file is loaded **as a plugin**. If you run Claude
+Code from inside this repo, the same `.mcp.json` is *also* picked up as a normal
+project-scope MCP config, where `${CLAUDE_PLUGIN_ROOT}` is unset — so it expands to
+`python3 /mcp/server.py`, which does not exist, and the server fails to start
+(`Failed to reconnect to task-cards: -32000`). With the plugin installed too, both
+register under the name `task-cards` and collide.
+
+Do **not** change `.mcp.json` to a relative path to "fix" this — the relative path
+would then break the plugin for every other project. Instead, suppress the
+project-scope copy in this repo only, via `.claude/settings.local.json` (gitignored):
+
+```json
+{
+  "disabledMcpjsonServers": ["task-cards"]
+}
+```
+
+This leaves the installed plugin's `task-cards` as the single, working server. The
+conflict exists *only* here, in the plugin's own source tree; any other project
+resolves `${CLAUDE_PLUGIN_ROOT}` correctly and needs no such override.
+
+> The graph UI port is configurable via `AGENT_OS_GRAPH_PORT` (default `5000`). The
+> server reuses an already-running graph server on that port instead of spawning a
+> duplicate, so multiple MCP instances (main loop + subagents) don't collide.
+
 ## Alternative: per-project MCP config (no plugin)
 
 If you only want the card/graph MCP tools in a single project (without the hooks,
