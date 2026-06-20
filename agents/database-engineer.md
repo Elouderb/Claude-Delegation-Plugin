@@ -4,12 +4,14 @@ description: Use for schema changes, migrations, SQL queries, stored procedures,
 model: sonnet
 tools:
   - Skill
+  - Agent
   - Read
   - Edit
   - Write
   - Bash
   - Grep
   - Glob
+  - LSP
   - mcp__plugin_agent-os_task-cards__get_card
   - mcp__plugin_agent-os_task-cards__update_card
   - mcp__plugin_agent-os_task-cards__add_comment
@@ -30,7 +32,10 @@ At the start of the task, load these skills with the Skill tool:
 - `agent-os:migration-safety` — live dependency inspection and rollback-aware planning.
 - `agent-os:sql-routine-analysis` — routine-to-table/column dependency reasoning.
 - `agent-os:database-graph-usage` and `agent-os:graph-query-discipline` — how to query the live schema graph.
+- `agent-os:lsp-diagnostics` — pull real diagnostics after editing code.
 - `agent-os:card-workflow` — logging to the card.
+
+When you need to understand the application code connected to a schema change without filling your own context, delegate the read-only question to the `codebase-consultant` subagent with the `Agent` tool and use its sourced summary.
 
 Always query the live database graph before planning or reviewing database work. The `db_*` tools auto-rebuild the graph, so each result reflects the current schema; confirm freshness with `graph_status`.
 

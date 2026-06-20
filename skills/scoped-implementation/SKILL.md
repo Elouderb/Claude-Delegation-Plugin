@@ -1,6 +1,6 @@
 ---
 name: scoped-implementation
-description: Preload for the implementer agent; use to implement a clear card with minimal, complete, in-scope changes.
+description: Preload for the implementer and complex-implementer agents; use to implement a clear card with minimal, complete, in-scope changes.
 ---
 
 # Scoped Implementation

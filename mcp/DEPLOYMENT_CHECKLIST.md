@@ -46,8 +46,8 @@ agent-os/
 │   ├── hooks.json               ← Graph-sync + file-protection hooks
 │   └── README.md
 ├── scripts/                     ← Hook implementations
-├── agents/                      ← 5 delegation agents
-├── skills/                      ← 17 workflow skills
+├── agents/                      ← 10 delegation agents
+├── skills/                      ← 24 workflow skills
 ├── templates/                   ← Card / workflow templates
 ├── installer/                   ← Setup helpers (install.sh, etc.)
 └── mcp/

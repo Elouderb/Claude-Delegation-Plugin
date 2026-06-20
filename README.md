@@ -1,6 +1,6 @@
 # Agent OS
 
-A repository-local "operating system" for agentic development in Claude Code, packaged as a Claude Code plugin (version `0.1.10`). It bundles task tracking, code/database knowledge graphs, lifecycle hooks, and a delegation-oriented set of agents and skills.
+A repository-local "operating system" for agentic development in Claude Code, packaged as a Claude Code plugin (version `0.1.13`). It bundles task tracking, code/database knowledge graphs, lifecycle hooks, and a delegation-oriented set of agents and skills.
 
 ## What's in the plugin
 
@@ -10,8 +10,8 @@ A repository-local "operating system" for agentic development in Claude Code, pa
 | **Graph query tools** | `mcp/server.py` | 18 read-oriented MCP tools over the Graphify code graph and the database graph (24 MCP tools total: 6 card + 18 graph/code/db). |
 | **Database graph builder** | `mcp/db_tools/` | Builds a graph of a Microsoft SQL Server schema (`build_db_graph.py` + `build_graph_html.py`). Optional; requires a SQL Server connection. |
 | **Graph-sync hooks** | `hooks/hooks.json`, `scripts/` | Keep the repository graph fresh and protect generated files. See `hooks/README.md`. |
-| **Agents** | `agents/` | `implementer`, `code-reviewer`, `test-engineer`, `database-engineer`, `research-planner`. |
-| **Skills** | `skills/` | 17 workflow skills for cards, planning, review, testing, and graph discipline. |
+| **Agents** | `agents/` | `implementer`, `complex-implementer` (opus / high-effort, for repo-wide or complex changes), `frontend-engineer` (UI), `codebase-consultant` (read-only repo investigator other agents can delegate to), `code-reviewer`, `security-reviewer`, `test-engineer`, `verification-engineer` (runs the real app / browser), `database-engineer`, `research-planner`. |
+| **Skills** | `skills/` | 24 workflow skills for cards, planning, review, testing, codebase investigation, verification, and graph discipline. |
 
 The MCP server is named `task-cards` (it exposes both the card tools and the graph tools).
 
