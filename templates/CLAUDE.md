@@ -113,8 +113,11 @@ database, can ignore this section entirely; the rest of the operating model stil
 
 When configured, the database-specific tools rebuild the graph (`build_db_graph.py` then
 `build_graph_html.py`) before answering, so results reflect the current schema **only if
-that rebuild succeeds**. If a refresh fails, stop and report the failure rather than relying
-on stale output.
+that rebuild succeeds**. A short staleness cache avoids rebuilding on every call: within
+`AGENT_OS_DB_GRAPH_TTL` seconds (default 30; set `0` to always rebuild) a recent graph is
+reused, so results may be up to that many seconds stale. If a refresh fails but a cached
+graph exists, the last-good graph is served with a warning; if none exists, the failure is
+reported. Stop and report rather than relying on stale output when freshness is critical.
 
 | Situation | Tool |
 |---|---|
