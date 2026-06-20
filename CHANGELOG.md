@@ -4,6 +4,22 @@ All notable changes to the **agent-os** plugin are documented here. The format i
 based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/), and this project
 adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.1.15] - 2026-06-20
+
+### Fixed
+- **Code-graph traversal was blind to real graphify output.** graphify emits
+  NetworkX node-link JSON (top-level `links`, edges keyed `relation`, nodes keyed
+  `file_type`), but the code-graph tools read `edges` / `relationship` / `type`,
+  so `code_find_callers`, `code_impact_analysis`, `graph_get_neighbors`,
+  `graph_get_subgraph`, and friends silently returned empty on every real graph —
+  and the test fixture encoded the wrong shape, which hid it from CI.
+  `graph_io.load_code_graph()` now normalizes graphify's format at load (additive,
+  idempotent aliases: `links`→`edges`, `relation`→`relationship`,
+  `file_type`→`type`), and `graph_status` counts links-or-edges. The database
+  graph is unaffected (it already emits `edges`). The fixture was corrected to real
+  graphify node-link format and a regression test added. Loading the live repo
+  graph now exposes 896 edges (was 0).
+
 ## [0.1.14] - 2026-06-20
 
 ### Security

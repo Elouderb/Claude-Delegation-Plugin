@@ -112,6 +112,41 @@ def load_database_graph() -> Optional[Dict[str, Any]]:
         return None
 
 
+def _normalize_code_graph(graph: Dict[str, Any]) -> Dict[str, Any]:
+    """Normalize a graphify NetworkX node-link graph to the shape the tools read.
+
+    graphify emits NetworkX node-link JSON, where edges live under a top-level
+    ``"links"`` key, each edge labels its kind under ``"relation"``, and each
+    node describes its kind under ``"file_type"``. The code-graph tools, however,
+    read ``"edges"`` / ``edge["relationship"]`` / ``node["type"]``. Without this
+    bridge every traversal and filter silently returns empty.
+
+    The normalization is **additive, idempotent, and non-destructive**: it only
+    fills the alias keys when they are absent, and never removes the originals.
+    A graph already in ``edges`` / ``relationship`` / ``type`` form (e.g. an
+    already-normalized graph or the database graph shape) passes through
+    unchanged.
+    """
+    if not isinstance(graph, dict):
+        return graph
+
+    # links -> edges (top-level)
+    if "edges" not in graph and "links" in graph:
+        graph["edges"] = graph["links"]
+
+    # relation -> relationship (per edge)
+    for edge in graph.get("edges", []) or []:
+        if isinstance(edge, dict) and "relationship" not in edge and "relation" in edge:
+            edge["relationship"] = edge["relation"]
+
+    # file_type -> type (per node)
+    for node in graph.get("nodes", []) or []:
+        if isinstance(node, dict) and "type" not in node and "file_type" in node:
+            node["type"] = node["file_type"]
+
+    return graph
+
+
 def load_code_graph() -> Optional[Dict[str, Any]]:
     """Load the code graph from graphify-out/graph.json."""
     try:
@@ -124,7 +159,7 @@ def load_code_graph() -> Optional[Dict[str, Any]]:
             return None
 
         with open(graph_path, 'r') as f:
-            return json.load(f)
+            return _normalize_code_graph(json.load(f))
     except Exception as e:
         log(f"ERROR loading code graph: {e}")
         return None

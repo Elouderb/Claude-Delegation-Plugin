@@ -274,7 +274,9 @@ def graph_status(graph: str = "code") -> dict:
             with open(graph_path) as f:
                 data = json.load(f)
                 status["node_count"] = len(data.get("nodes", []))
-                status["edge_count"] = len(data.get("edges", []))
+                # The graphify (code) graph stores edges under "links"; the DB
+                # graph uses "edges". Count whichever is present.
+                status["edge_count"] = len(data.get("edges") or data.get("links") or [])
 
         return format_graph_response(graph, {}, status)
     except Exception as e:
