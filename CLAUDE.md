@@ -15,11 +15,8 @@ A lightweight task/card management system designed as an MCP server. It provides
 ## Installation
 
 ```bash
-# Install dependencies
-pip install -r requirements.txt
-
-# Or run the installation script
-bash install.sh
+# Install dependencies (core: mcp, flask, python-dotenv)
+pip install -r mcp/requirements.txt
 ```
 
 ## Usage
@@ -172,9 +169,9 @@ Future features (not in scope yet):
 
 ## Files
 
-- `server.py` - Main MCP server (Python)
-- `requirements.txt` - Dependencies
-- `install.sh` - Installation helper
+- `mcp/server.py` - Thin MCP entrypoint; tools live in `mcp/*_tools.py` modules
+- `mcp/requirements.txt` - Core dependencies (`mcp`, `flask`, `python-dotenv`)
+- `installer/install.sh` - Installation helper
 - `CLAUDE.md` - This documentation
 - `.agent-os/cards.sqlite` - Repository-local database (created on first run)
 

@@ -4,6 +4,40 @@ All notable changes to the **agent-os** plugin are documented here. The format i
 based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/), and this project
 adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.1.10] - 2026-06-19
+
+### Added
+- **Test suite + CI:** new `mcp/tests/` covering the code-graph tools, shared
+  graph tools, the Flask navigation routes (incl. XSS-escaping assertions), and
+  `scripts/hook_common.py`, plus `mcp/test_probe_health.py`. A GitHub Actions
+  workflow (`.github/workflows/ci.yml`) runs `py_compile` + the full suite on
+  push/PR. db-graph tools are skipped in CI (need pyodbc + live SQL Server).
+  Dev-only test deps live in `dev-requirements.txt`.
+- **Fresh-install smoke test** (`mcp/smoke_test.py`): provisions a throwaway
+  venv, boots the MCP server over stdio (asserting a clean newline-delimited
+  JSON-RPC handshake with no stdout corruption), checks Flask `/health`, and
+  round-trips a card. Documented in `mcp/DEPLOYMENT_CHECKLIST.md`.
+
+### Changed
+- **`server.py` split:** the 1,435-line monolith is now a thin entrypoint that
+  registers all 24 tools from focused modules — `card_tools`, `code_graph_tools`,
+  `shared_graph_tools`, `db_graph_tools`, `graph_io`, `graph_server`. No tool
+  names, signatures, or behavior changed. Tool modules reference the graph
+  loaders / `get_repo_root` via the `graph_io.` namespace so those seams are
+  patchable in tests.
+- **Documentation consolidation:** removed the stale `PROJECT_SUMMARY.md` and
+  `NEW_MCP_TOOLING.md`; corrected drift across `README.md` / `CLAUDE.md` /
+  `mcp/DEPLOYMENT_CHECKLIST.md` / `hooks/README.md` — per-repo graph-UI URL
+  (`/<slug>/`), `graphify update . --force`, `flask` + `python-dotenv` as core
+  deps, and tool counts.
+
+### Fixed
+- **Graph-server lifecycle robustness:** `start_graph_server()` now probes
+  `/health` before reusing an in-use port (a foreign or dead process holding the
+  port is detected and logged instead of assumed healthy), surfaces a crashed
+  child's stderr, and respawns a dead child via `_check_graph_server_health()`.
+  Stdlib only (`http.client`); no new dependency.
+
 ## [0.1.9] - 2026-06-19
 
 ### Changed

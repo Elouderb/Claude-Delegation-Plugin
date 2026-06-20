@@ -11,12 +11,11 @@
 ### Documentation
 - [x] `README.md` — install and overview
 - [x] `CLAUDE.md` — tool documentation
-- [x] `PROJECT_SUMMARY.md` — card subsystem summary
 - [x] `CHANGELOG.md` — version history
 - [x] This checklist — deployment verification
 
 ### Dependencies
-- [x] `mcp/requirements.txt` ships `mcp` only
+- [x] `mcp/requirements.txt` ships core deps (`mcp`, `flask`, `python-dotenv`)
 - [x] Database-graph subsystem deps (`pyodbc` + live SQL Server + `.env`
       `DB_CONNECTION_STRING`) are optional
 
@@ -52,9 +51,11 @@ agent-os/
 ├── templates/                   ← Card / workflow templates
 ├── installer/                   ← Setup helpers (install.sh, etc.)
 └── mcp/
-    ├── server.py                ← MCP server (cards + 18 graph tools)
-    ├── test_server.py           ← Card test suite (8/8 passing)
-    ├── requirements.txt         ← Dependencies (mcp only)
+    ├── server.py                ← Thin MCP entrypoint (registers 24 tools)
+    ├── card_tools.py / code_graph_tools.py / db_graph_tools.py
+    ├── shared_graph_tools.py / graph_io.py / graph_server.py
+    ├── test_server.py + tests/  ← Test suite (card + graph + flask + hooks)
+    ├── requirements.txt         ← Core deps (mcp, flask, python-dotenv)
     ├── example_usage.py         ← Usage examples
     └── db_tools/                ← Optional SQL Server graph builder
         ├── app.py               ← Flask graph UI (port 5000, AGENT_OS_GRAPH_PORT)
@@ -158,6 +159,54 @@ If issues arise after deployment:
 2. **Rollback**: `/plugin uninstall agent-os@agent-os-local`
 3. **Check Logs**: Look for the server's stderr output in Claude Code logs.
 4. **Report**: Open an issue with the error output and logs.
+
+---
+
+## Smoke Test
+
+A fresh-install end-to-end smoke test lives at **`mcp/smoke_test.py`**.
+
+### What it tests
+
+1. Installs `mcp/requirements.txt` into a throwaway virtualenv in a temp dir.
+2. Starts `mcp/server.py` over stdio and asserts a clean JSON-RPC handshake
+   (sends an `initialize` request, reads a well-formed `{"jsonrpc":"2.0","result":...}`
+   response — any log/banner on stdout would break this and is caught explicitly).
+3. Waits for the Flask graph server (`mcp/db_tools/app.py`) to bind its port
+   and checks that `GET /health` returns HTTP 200 with `{"status":"ok"}`.
+4. Creates a card via `server.create_card` and reads it back, confirming the
+   SQLite card path works end-to-end in the throwaway environment.
+5. Tears everything down (temp dir, venv, spawned processes) via a `finally`
+   block and `signal.signal` handlers — runs even on failure.
+
+### Running it
+
+```bash
+python3 mcp/smoke_test.py
+```
+
+Exits 0 on success, 1 on any failed assertion (with a clear message), and 2
+when the environment cannot spawn the server at all (CI-friendly skip).
+
+### Options
+
+| Environment variable    | Default        | Purpose                                    |
+|-------------------------|----------------|--------------------------------------------|
+| `AGENT_OS_GRAPH_PORT`   | auto-select    | Pin the Flask port (avoids collision)      |
+| `SMOKE_TIMEOUT`         | 20             | Seconds to wait for servers to become ready |
+| `CI`                    | unset          | Set to enable skip-on-failure (exit 2)     |
+
+### CI usage
+
+```yaml
+# Example GitHub Actions step
+- name: Smoke test
+  run: python3 mcp/smoke_test.py
+  continue-on-error: false   # fail the job if the smoke test fails
+```
+
+The script is self-contained — no live SQL Server or `pyodbc` required.
+The database-graph subsystem is out of scope for this test.
 
 ---
 
