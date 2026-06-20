@@ -1,0 +1,59 @@
+{
+  "nodes": [
+    {
+      "id": "myapp.utils",
+      "label": "utils",
+      "type": "module",
+      "source_file": "myapp/utils.py",
+      "source_location": "L1"
+    },
+    {
+      "id": "myapp.utils.helper_func",
+      "label": "helper_func",
+      "type": "function",
+      "source_file": "myapp/utils.py",
+      "source_location": "L10"
+    },
+    {
+      "id": "myapp.main",
+      "label": "main",
+      "type": "module",
+      "source_file": "myapp/main.py",
+      "source_location": "L1"
+    },
+    {
+      "id": "myapp.main.run",
+      "label": "run",
+      "type": "function",
+      "source_file": "myapp/main.py",
+      "source_location": "L5"
+    },
+    {
+      "id": "tests.test_utils",
+      "label": "test_utils",
+      "type": "module",
+      "source_file": "tests/test_utils.py",
+      "source_location": "L1"
+    }
+  ],
+  "edges": [
+    {
+      "source": "myapp.main.run",
+      "target": "myapp.utils.helper_func",
+      "relationship": "calls",
+      "confidence": 0.9
+    },
+    {
+      "source": "myapp.main",
+      "target": "myapp.utils",
+      "relationship": "imports",
+      "confidence": 1.0
+    },
+    {
+      "source": "tests.test_utils",
+      "target": "myapp.utils.helper_func",
+      "relationship": "calls",
+      "confidence": 0.8
+    }
+  ]
+}

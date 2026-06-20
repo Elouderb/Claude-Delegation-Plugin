@@ -1,0 +1,36 @@
+name: CI
+
+on:
+  push:
+    branches: ["**"]
+  pull_request:
+    branches: ["**"]
+
+jobs:
+  test:
+    name: Test (Python 3.12)
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python 3.12
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install runtime dependencies
+        run: pip install -r mcp/requirements.txt
+
+      - name: Install dev dependencies
+        run: pip install -r dev-requirements.txt
+
+      - name: Syntax-check all tracked Python files
+        run: |
+          git ls-files '*.py' | xargs python -m py_compile
+
+      - name: Run test suite
+        # db_* tools require pyodbc + a live SQL Server — those tests are
+        # marked @unittest.skip and will appear as "1 skipped" here, which
+        # is expected and acceptable.
+        run: python -m pytest mcp/tests/ mcp/test_server.py mcp/test_probe_health.py -v

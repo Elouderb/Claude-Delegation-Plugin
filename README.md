@@ -1,6 +1,6 @@
 # Agent OS
 
-A repository-local "operating system" for agentic development in Claude Code, packaged as a Claude Code plugin (version `0.1.9`). It bundles task tracking, code/database knowledge graphs, lifecycle hooks, and a delegation-oriented set of agents and skills.
+A repository-local "operating system" for agentic development in Claude Code, packaged as a Claude Code plugin (version `0.1.10`). It bundles task tracking, code/database knowledge graphs, lifecycle hooks, and a delegation-oriented set of agents and skills.
 
 ## What's in the plugin
 
@@ -42,10 +42,15 @@ graph-sync hooks (which run `graphify update .`) to work.
 
 ### Graph UI
 
-The graph tooling serves a Flask web UI at <http://localhost:5000/>. The port is
-configurable via the `AGENT_OS_GRAPH_PORT` environment variable. The MCP server
-reuses an already-running graph server on that port instead of spawning a
-duplicate, so the main loop and subagents don't collide.
+The graph tooling serves a Flask web UI, namespaced per repository. Open
+<http://localhost:5000/> for the list of active repos, then
+`http://localhost:5000/<repo-slug>/` for that repo's code graph, database graph,
+and task cards. The port is configurable via the `AGENT_OS_GRAPH_PORT`
+environment variable. The MCP server reuses an already-running graph server on
+that port instead of spawning a duplicate, so the main loop and subagents don't
+collide. `flask` and `python-dotenv` are **core** requirements (in
+`mcp/requirements.txt`), since this UI serves the code graph and cards — not just
+the optional database subsystem.
 
 ### Artifact locations
 
@@ -81,7 +86,6 @@ Cards are repository-local: each repo gets its own `.agent-os/cards.sqlite`, dis
 - `CLAUDE.md` — detailed tool reference and the recommended agent operating model.
 - `INTEGRATION.md` — project setup and workflow rules.
 - `hooks/README.md` — how the graph-sync hooks behave.
-- `NEW_MCP_TOOLING.md` — specification for the 18 graph tools.
 - `CHANGELOG.md` — change history.
 
 ## Testing
