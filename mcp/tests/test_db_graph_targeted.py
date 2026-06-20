@@ -451,8 +451,8 @@ class TestTargetedToolRouting(unittest.TestCase):
         # so the tools' strip-prefix matching is genuinely exercised.
         return {
             "nodes": [
-                {"id": "table:dbo.A", "type": "Table", "label": "A"},
-                {"id": "column:dbo.A.Id", "type": "Column", "label": "Id"},
+                {"id": "table:dbo.A", "node_type": "Table", "qualified_name": "dbo.A", "name": "A"},
+                {"id": "column:dbo.A.Id", "node_type": "Column", "qualified_name": "dbo.A.Id", "name": "Id"},
             ],
             "edges": [
                 {"source": "table:dbo.A", "target": "column:dbo.A.Id", "relationship": "Stores"},
@@ -543,8 +543,8 @@ class TestPrefixedIdLookup(unittest.TestCase):
 
     _GRAPH = {
         "nodes": [
-            {"id": "table:dbo.A", "type": "Table", "label": "A"},
-            {"id": "column:dbo.A.Id", "type": "Column", "label": "Id"},
+            {"id": "table:dbo.A", "node_type": "Table", "qualified_name": "dbo.A", "name": "A"},
+            {"id": "column:dbo.A.Id", "node_type": "Column", "qualified_name": "dbo.A.Id", "name": "Id"},
         ],
         "edges": [
             {"source": "table:dbo.A", "target": "column:dbo.A.Id", "relationship": "Stores"},

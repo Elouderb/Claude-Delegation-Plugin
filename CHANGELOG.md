@@ -4,6 +4,20 @@ All notable changes to the **agent-os** plugin are documented here. The format i
 based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/), and this project
 adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.2.2] - 2026-06-20
+
+### Fixed
+- **`db_get_table` / `db_get_column` now find objects that exist.** A second
+  node-field mismatch (sibling of the 0.2.1 prefix fix): the tools gated on
+  `node.get("type") == "Table"/"Column"`, but the build emits the type under
+  **`node_type`** (there is no `type` key), so both returned "not found" for every
+  real object. They now read `node_type`. `db_search_schema` likewise reads the
+  real `node_type` (fixing its `object_type` filter) and surfaces
+  `qualified_name` / `name` instead of the absent `label`. Found by querying the
+  live DB graph and validated against the real `db_graph.json` node structure; the
+  test fixtures were corrected to mirror the real node schema (the prior fixtures
+  encoded the wrong fields — which is what hid both this and the prefix bug).
+
 ## [0.2.1] - 2026-06-20
 
 ### Performance
