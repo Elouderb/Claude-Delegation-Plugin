@@ -114,6 +114,18 @@ To ship a change:
 3. Confirm the cache updated — a new version dir should exist under
    `~/.claude/plugins/cache/agent-os-local/agent-os/<version>/`.
 
+> **MCP-server code needs a per-session reconnect.** `/reload-plugins` reloads
+> agents, skills, and hooks, but it does **not** restart the long-running
+> `mcp/server.py` process — Python loaded its modules into memory when the server
+> spawned, and a config reload won't hot-swap them. After changing any `mcp/*.py`
+> (the card tools, graph tools, graph loaders, or the Flask UI), run **`/mcp`**
+> (reconnect) in each session that needs the new code, or restart Claude Code.
+> MCP servers are **per-session**: other open windows keep the old code until they
+> reconnect, so you don't need to close every window — only refresh the ones you
+> want on the new code. Symptom of a stale server: edits are merged and the source
+> on disk is correct, but the tools still behave as before (e.g. graph traversal
+> returns no edges) until the reconnect.
+
 For tight iteration without bumping each time, use
 `claude --plugin-dir /path/to/agent-os`, which live-loads from the source tree.
 
