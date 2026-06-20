@@ -93,7 +93,7 @@ def db_get_table(table_name: str) -> dict:
 
         table_node = None
         for node in nodes:
-            if _strip_type_prefix(node.get("id")) == table_name and node.get("type") == "Table":
+            if _strip_type_prefix(node.get("id")) == table_name and node.get("node_type") == "Table":
                 table_node = node
                 break
 
@@ -148,7 +148,7 @@ def db_get_column(table_name: str, column_name: str) -> dict:
 
         col_node = None
         for node in nodes:
-            if _strip_type_prefix(node.get("id")) == col_id and node.get("type") == "Column":
+            if _strip_type_prefix(node.get("id")) == col_id and node.get("node_type") == "Column":
                 col_node = node
                 break
 
@@ -181,15 +181,16 @@ def db_search_schema(query: str, object_type: Optional[str] = None) -> dict:
         results = []
 
         for node in nodes:
-            node_type = node.get("type", "")
+            node_type = node.get("node_type", "")
             if object_type and object_type != node_type:
                 continue
 
+            name = node.get("qualified_name") or node.get("name") or ""
             if query.lower() in node.get("id", "").lower() or \
-               query.lower() in node.get("label", "").lower():
+               query.lower() in name.lower():
                 results.append({
                     "id": node.get("id"),
-                    "label": node.get("label"),
+                    "label": name,
                     "type": node_type
                 })
 
