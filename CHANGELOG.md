@@ -4,6 +4,26 @@ All notable changes to the **agent-os** plugin are documented here. The format i
 based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/), and this project
 adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.2.0] - 2026-06-20
+
+**Milestone release.** agent-os has grown from a task-cards MCP server into a full
+agentic-development operating system: a delegation-first plugin where the main
+Claude Code instance orchestrates a roster of **10 specialist agents** and **24
+skills** — across implementation, investigation, review, security, testing,
+verification, and data work — backed by repository and database knowledge graphs,
+lifecycle hooks, and a per-repo graph UI. The 0.1.x series delivered the agent
+roster, subagent nesting, the per-operation card database, the graph-UI security
+hardening, and the graphify node-link traversal fix; 0.2.0 marks that maturity.
+
+### Changed (documentation)
+- **Release discipline: MCP-server code needs a per-session reconnect.**
+  `mcp/DEPLOYMENT_CHECKLIST.md` now documents that changes to `mcp/*.py` take
+  effect only after a `/mcp` reconnect (or a Claude Code restart) in each session
+  — `/reload-plugins` reloads agents, skills, and hooks but cannot hot-reload the
+  long-running MCP server's Python process. MCP servers are per-session, so other
+  windows keep the old code until they reconnect; you don't need to close every
+  window.
+
 ## [0.1.15] - 2026-06-20
 
 ### Fixed
