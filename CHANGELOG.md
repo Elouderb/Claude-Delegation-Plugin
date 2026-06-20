@@ -4,6 +4,45 @@ All notable changes to the **agent-os** plugin are documented here. The format i
 based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/), and this project
 adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.2.1] - 2026-06-20
+
+### Performance
+- **DB graph: stop rebuilding the whole schema on every `db_*` call.** Four changes:
+  - **TTL cache** (`AGENT_OS_DB_GRAPH_TTL`, default 30s; `0` = always rebuild):
+    consecutive `db_*` calls within the window reuse the last build instead of a fresh
+    full pull; a failed rebuild serves the last-good graph with a warning.
+  - **In-process build over a pooled pyodbc connection** replaces the two cold
+    subprocess spawns + re-auth per call; the build core is now importable
+    (`build_db_graph.build_graph_data` / `build_and_write`) with the CLI preserved.
+  - **No HTML on the tool path** — `db_*` builds data only; the Flask UI still
+    regenerates the pyvis HTML on its own refresh.
+  - **Targeted bounded-neighborhood build** (`AGENT_OS_DB_GRAPH_DEPTH`): `db_get_table`,
+    `db_get_column`, `db_get_table_relationships`, and `db_get_routine_dependencies`
+    build only the subgraph around their entry object (table / column / function /
+    procedure) to a bounded depth via WHERE-filtered BFS, instead of the full schema.
+    `db_search_schema` and `db_find_relationship_path` keep the full (now cached,
+    in-process) build.
+
+### Security
+- `refresh_database_graph` no longer returns raw exception text to callers — only
+  controlled connection-setup messages; other errors are logged to stderr and
+  generalized, avoiding internal-path disclosure (the same leak class fixed for the
+  Flask UI in 0.1.14). Added a lock around the pooled connection's reopen sequence.
+
+### Fixed
+- **DB tools now actually return results.** The exact-match tools compared raw
+  caller names against the build's *prefixed* node ids (`table:` / `column:` /
+  `<routine>:`), so `db_get_table`, `db_get_column`, `db_get_table_relationships`,
+  `db_get_routine_dependencies`, and `db_find_relationship_path` returned "not
+  found" for every real object. They now normalize the prefix before matching
+  (and `db_find_relationship_path` seeds its BFS with the prefixed table id, then
+  strips prefixes in the returned path). Pre-existing bug, surfaced by the 0.2.1
+  review.
+
+### Notes
+- The DB-graph changes are validated by mock-based tests only (no live SQL Server in
+  CI); the `sys.*` WHERE-filtering should be smoke-tested against a real database.
+
 ## [0.2.0] - 2026-06-20
 
 **Milestone release.** agent-os has grown from a task-cards MCP server into a full

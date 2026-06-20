@@ -40,23 +40,45 @@ from collections import Counter, defaultdict
 from datetime import date, datetime
 from decimal import Decimal
 from pathlib import Path
-from typing import Any
-from dotenv import load_dotenv
-load_dotenv()
+from typing import TYPE_CHECKING, Any
 
 try:
+    from dotenv import load_dotenv
+
+    load_dotenv()
+except ImportError:  # pragma: no cover - dotenv is a core dep, but stay importable
+    pass
+
+# networkx and pyodbc are OPTIONAL dependencies of the database-graph subsystem.
+# They are imported lazily inside the functions that actually need them so that
+# this module stays importable (e.g. by graph_io's in-process build path, or by
+# the test suite) even when neither package is installed.  When a build is
+# actually attempted without them, a clear error is raised at that point.
+if TYPE_CHECKING:  # pragma: no cover - import for type checkers only
     import networkx as nx
-except ImportError as exc:
-    raise SystemExit(
-        "Missing dependency: networkx. Install with: pip install networkx"
-    ) from exc
-
-try:
     import pyodbc
-except ImportError as exc:
-    raise SystemExit(
-        "Missing dependency: pyodbc. Install with: pip install pyodbc"
-    ) from exc
+
+
+def _require_networkx():
+    """Import and return the networkx module, with a clear error if absent."""
+    try:
+        import networkx as nx
+    except ImportError as exc:  # pragma: no cover - exercised when dep missing
+        raise SystemExit(
+            "Missing dependency: networkx. Install with: pip install networkx"
+        ) from exc
+    return nx
+
+
+def _require_pyodbc():
+    """Import and return the pyodbc module, with a clear error if absent."""
+    try:
+        import pyodbc
+    except ImportError as exc:  # pragma: no cover - exercised when dep missing
+        raise SystemExit(
+            "Missing dependency: pyodbc. Install with: pip install pyodbc"
+        ) from exc
+    return pyodbc
 
 
 TABLES_SQL = """
@@ -240,6 +262,245 @@ ORDER BY
 PROCEDURE_TYPES = {"P", "PC"}
 FUNCTION_TYPES = {"FN", "IF", "TF", "FS", "FT"}
 
+# ---------------------------------------------------------------------------
+# Targeted (bounded-neighborhood) build — entry resolution + filtered queries
+# ---------------------------------------------------------------------------
+#
+# The full-schema queries above pull the ENTIRE catalog.  For a targeted build
+# we instead walk outward from a single entry object to a bounded depth, issuing
+# WHERE-filtered variants of the same catalog queries per BFS frontier so the
+# database does the pruning (filtered query, not full-pull-then-filter).  Every
+# catalog object is keyed by its integer ``object_id``; the BFS therefore tracks
+# a frontier of object_ids and expands it over FK edges (sys.foreign_keys) and
+# routine/object dependency edges (sys.sql_expression_dependencies).
+#
+# The rows produced by these filtered queries have the SAME column shape as the
+# full-build rows, so the assembled row lists feed the UNCHANGED build_graph() +
+# graph_to_json() and yield a strict subset of the full graph with an identical
+# node/edge schema.
+#
+# Valid entry_type values for build_targeted_graph_data().
+TARGETED_ENTRY_TYPES = ("table", "column", "function", "procedure")
+
+# --- Entry-point resolution -------------------------------------------------
+# Resolve a schema-qualified table / routine name to its object_id.  Used for
+# entry_type in {table, function, procedure} (a column entry resolves its parent
+# table's object_id and remembers the column for depth-0 scoping).
+
+RESOLVE_TABLE_OBJECT_ID_SQL = """
+SELECT t.object_id
+FROM sys.tables AS t
+JOIN sys.schemas AS s
+    ON s.schema_id = t.schema_id
+WHERE t.is_ms_shipped = 0
+  AND s.name = ?
+  AND t.name = ?;
+"""
+
+RESOLVE_ROUTINE_OBJECT_ID_SQL = """
+SELECT o.object_id
+FROM sys.objects AS o
+JOIN sys.schemas AS s
+    ON s.schema_id = o.schema_id
+WHERE o.is_ms_shipped = 0
+  AND s.name = ?
+  AND o.name = ?
+  AND o.type IN ('P', 'PC', 'FN', 'IF', 'TF', 'FS', 'FT');
+"""
+
+# --- Per-frontier filtered catalog queries ---------------------------------
+# Each appends an ``IN (...)`` clause sized to the current frontier (see
+# _in_clause / _fetch_rows_in).  They are otherwise identical in column shape to
+# the corresponding full-schema query so build_graph() consumes them unchanged.
+
+TABLES_FILTERED_SQL = """
+SELECT
+    s.name AS schema_name,
+    t.name AS table_name,
+    t.object_id,
+    t.create_date,
+    t.modify_date,
+    t.is_memory_optimized,
+    t.temporal_type_desc
+FROM sys.tables AS t
+JOIN sys.schemas AS s
+    ON s.schema_id = t.schema_id
+WHERE t.is_ms_shipped = 0
+  AND t.object_id IN ({placeholders})
+ORDER BY s.name, t.name;
+"""
+
+COLUMNS_FILTERED_SQL = """
+SELECT
+    s.name AS schema_name,
+    t.name AS table_name,
+    t.object_id AS table_object_id,
+    c.column_id,
+    c.name AS column_name,
+    ty.name AS data_type,
+    CASE
+        WHEN ty.name IN ('nchar', 'nvarchar') AND c.max_length > 0
+            THEN c.max_length / 2
+        ELSE c.max_length
+    END AS max_length,
+    c.precision,
+    c.scale,
+    c.is_nullable,
+    c.is_identity,
+    c.is_computed,
+    dc.definition AS default_definition,
+    cc.definition AS computed_definition,
+    c.collation_name
+FROM sys.tables AS t
+JOIN sys.schemas AS s
+    ON s.schema_id = t.schema_id
+JOIN sys.columns AS c
+    ON c.object_id = t.object_id
+JOIN sys.types AS ty
+    ON ty.user_type_id = c.user_type_id
+LEFT JOIN sys.default_constraints AS dc
+    ON dc.parent_object_id = c.object_id
+   AND dc.parent_column_id = c.column_id
+LEFT JOIN sys.computed_columns AS cc
+    ON cc.object_id = c.object_id
+   AND cc.column_id = c.column_id
+WHERE t.is_ms_shipped = 0
+  AND t.object_id IN ({placeholders})
+ORDER BY s.name, t.name, c.column_id;
+"""
+
+PRIMARY_KEYS_FILTERED_SQL = """
+SELECT
+    s.name AS schema_name,
+    t.name AS table_name,
+    c.name AS column_name,
+    kc.name AS constraint_name,
+    ic.key_ordinal
+FROM sys.key_constraints AS kc
+JOIN sys.tables AS t
+    ON t.object_id = kc.parent_object_id
+JOIN sys.schemas AS s
+    ON s.schema_id = t.schema_id
+JOIN sys.index_columns AS ic
+    ON ic.object_id = t.object_id
+   AND ic.index_id = kc.unique_index_id
+JOIN sys.columns AS c
+    ON c.object_id = ic.object_id
+   AND c.column_id = ic.column_id
+WHERE kc.type = 'PK'
+  AND t.is_ms_shipped = 0
+  AND t.object_id IN ({placeholders})
+ORDER BY s.name, t.name, ic.key_ordinal;
+"""
+
+# Foreign keys touching the frontier in EITHER direction (parent table in the
+# frontier OR referenced table in the frontier).  Returning both lets the BFS
+# discover neighbours upstream and downstream of the frontier tables.
+FOREIGN_KEYS_FILTERED_SQL = """
+SELECT
+    fk.name AS foreign_key_name,
+    ps.name AS parent_schema,
+    pt.name AS parent_table,
+    pc.name AS parent_column,
+    rs.name AS referenced_schema,
+    rt.name AS referenced_table,
+    rc.name AS referenced_column,
+    fkc.constraint_column_id,
+    fk.delete_referential_action_desc,
+    fk.update_referential_action_desc,
+    fk.is_disabled,
+    fk.is_not_trusted,
+    pt.object_id AS parent_object_id,
+    rt.object_id AS referenced_object_id
+FROM sys.foreign_keys AS fk
+JOIN sys.foreign_key_columns AS fkc
+    ON fkc.constraint_object_id = fk.object_id
+JOIN sys.tables AS pt
+    ON pt.object_id = fkc.parent_object_id
+JOIN sys.schemas AS ps
+    ON ps.schema_id = pt.schema_id
+JOIN sys.columns AS pc
+    ON pc.object_id = fkc.parent_object_id
+   AND pc.column_id = fkc.parent_column_id
+JOIN sys.tables AS rt
+    ON rt.object_id = fkc.referenced_object_id
+JOIN sys.schemas AS rs
+    ON rs.schema_id = rt.schema_id
+JOIN sys.columns AS rc
+    ON rc.object_id = fkc.referenced_object_id
+   AND rc.column_id = fkc.referenced_column_id
+WHERE pt.is_ms_shipped = 0
+  AND rt.is_ms_shipped = 0
+  AND (pt.object_id IN ({placeholders}) OR rt.object_id IN ({placeholders}))
+ORDER BY ps.name, pt.name, fk.name, fkc.constraint_column_id;
+"""
+
+ROUTINES_FILTERED_SQL = """
+SELECT
+    s.name AS schema_name,
+    o.name AS object_name,
+    o.object_id,
+    o.type AS object_type_code,
+    o.type_desc,
+    o.create_date,
+    o.modify_date,
+    sm.definition,
+    sm.is_schema_bound,
+    sm.uses_ansi_nulls,
+    sm.uses_quoted_identifier
+FROM sys.objects AS o
+JOIN sys.schemas AS s
+    ON s.schema_id = o.schema_id
+LEFT JOIN sys.sql_modules AS sm
+    ON sm.object_id = o.object_id
+WHERE o.is_ms_shipped = 0
+  AND o.type IN ('P', 'PC', 'FN', 'IF', 'TF', 'FS', 'FT')
+  AND o.object_id IN ({placeholders})
+ORDER BY s.name, o.name;
+"""
+
+# Dependency edges touching the frontier in EITHER direction (the referencing
+# routine in the frontier OR the referenced table in the frontier).  This lets
+# the BFS reach a routine from a table it reads, and a table from a routine that
+# reads it.
+DEPENDENCIES_FILTERED_SQL = """
+SELECT DISTINCT
+    ro.object_id AS referencing_object_id,
+    rs.name AS referencing_schema,
+    ro.name AS referencing_name,
+    ro.type AS referencing_type_code,
+    sed.referenced_id,
+    sed.referenced_minor_id,
+    COALESCE(sed.referenced_schema_name, ts.name) AS referenced_schema,
+    COALESCE(sed.referenced_entity_name, tt.name) AS referenced_table,
+    tc.name AS referenced_column,
+    sed.is_schema_bound_reference,
+    sed.is_ambiguous,
+    tt.object_id AS referenced_object_id
+FROM sys.sql_expression_dependencies AS sed
+JOIN sys.objects AS ro
+    ON ro.object_id = sed.referencing_id
+JOIN sys.schemas AS rs
+    ON rs.schema_id = ro.schema_id
+LEFT JOIN sys.tables AS tt
+    ON tt.object_id = sed.referenced_id
+LEFT JOIN sys.schemas AS ts
+    ON ts.schema_id = tt.schema_id
+LEFT JOIN sys.columns AS tc
+    ON tc.object_id = sed.referenced_id
+   AND tc.column_id = sed.referenced_minor_id
+WHERE ro.is_ms_shipped = 0
+  AND ro.type IN ('P', 'PC', 'FN', 'IF', 'TF', 'FS', 'FT')
+  AND tt.object_id IS NOT NULL
+  AND (ro.object_id IN ({placeholders}) OR tt.object_id IN ({placeholders}))
+ORDER BY
+    rs.name,
+    ro.name,
+    referenced_schema,
+    referenced_table,
+    referenced_column;
+"""
+
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
@@ -268,6 +529,36 @@ def parse_args() -> argparse.Namespace:
         type=int,
         default=30,
         help="Connection timeout in seconds. Default: 30",
+    )
+    parser.add_argument(
+        "--entry-point",
+        default=None,
+        help=(
+            "Build only the bounded neighborhood around this object instead of "
+            "the whole schema. Identifier form: 'schema.object' for a table, "
+            "function, or procedure; 'schema.table.column' for a column. "
+            "With no --entry-point, the full schema is built (default)."
+        ),
+    )
+    parser.add_argument(
+        "--entry-type",
+        choices=list(TARGETED_ENTRY_TYPES),
+        default=None,
+        help=(
+            "Kind of object --entry-point names: table, column, function, or "
+            "procedure. Required when --entry-point is given."
+        ),
+    )
+    parser.add_argument(
+        "--max-depth",
+        type=int,
+        default=1,
+        help=(
+            "For a targeted (--entry-point) build, the number of relationship "
+            "hops to expand outward over FK and routine-dependency edges. "
+            "0 = the entry object only (plus its own columns for a table). "
+            "Default: 1. Ignored for a full build."
+        ),
     )
     return parser.parse_args()
 
@@ -358,6 +649,7 @@ def build_graph(
     dependencies: list[dict[str, Any]],
     include_definitions: bool,
 ) -> nx.MultiDiGraph:
+    nx = _require_networkx()
     graph = nx.MultiDiGraph(
         name="SQL Server Database Structure",
         directed=True,
@@ -699,6 +991,7 @@ def atomic_write_text(path: Path, content: str) -> None:
 
 
 def write_outputs(graph: nx.MultiDiGraph, output_dir: Path) -> None:
+    nx = _require_networkx()
     output_dir.mkdir(parents=True, exist_ok=True)
 
     json_path = output_dir / "db_graph.json"
@@ -761,6 +1054,298 @@ def write_outputs(graph: nx.MultiDiGraph, output_dir: Path) -> None:
     temp_graphml.replace(graphml_path)
 
 
+def fetch_schema(cursor: "pyodbc.Cursor") -> dict[str, list[dict[str, Any]]]:
+    """Run the six sys.* catalog queries against an open cursor.
+
+    Returns a dict keyed by the six row-set names consumed by build_graph().
+    Pure I/O — keeps the network/DB access in one place so callers can stub it.
+    """
+    return {
+        "tables": fetch_rows(cursor, TABLES_SQL),
+        "columns": fetch_rows(cursor, COLUMNS_SQL),
+        "primary_keys": fetch_rows(cursor, PRIMARY_KEYS_SQL),
+        "foreign_keys": fetch_rows(cursor, FOREIGN_KEYS_SQL),
+        "routines": fetch_rows(cursor, ROUTINES_SQL),
+        "dependencies": fetch_rows(cursor, DEPENDENCIES_SQL),
+    }
+
+
+def build_graph_data(
+    connection: "pyodbc.Connection",
+    include_definitions: bool = False,
+) -> dict[str, Any]:
+    """Importable core: read the schema over `connection` and return the JSON dict.
+
+    This is the in-process entry point used by graph_io's pooled-connection build
+    path.  It performs exactly the same reads + NetworkX construction +
+    serialization as the CLI, so the returned dict is byte-/shape-identical to
+    what graph_to_json() produces for the subprocess build.  It does NOT touch the
+    filesystem and does NOT build the pyvis HTML — callers that want files use
+    build_and_write().
+
+    `connection` is any object exposing pyodbc's `.cursor()` (a live pyodbc
+    connection in production, a stub in tests).
+    """
+    cursor = connection.cursor()
+    rows = fetch_schema(cursor)
+    graph = build_graph(
+        tables=rows["tables"],
+        columns=rows["columns"],
+        primary_keys=rows["primary_keys"],
+        foreign_keys=rows["foreign_keys"],
+        routines=rows["routines"],
+        dependencies=rows["dependencies"],
+        include_definitions=include_definitions,
+    )
+    return graph_to_json(graph)
+
+
+# ---------------------------------------------------------------------------
+# Targeted (bounded-neighborhood) build core
+# ---------------------------------------------------------------------------
+
+
+def _split_entry_point(entry_point: str, entry_type: str) -> tuple[str, str, "str | None"]:
+    """Split a qualified entry identifier into (schema, object_name, column_name).
+
+    Accepted forms:
+        - table / function / procedure: ``schema.object``
+        - column:                       ``schema.table.column``
+
+    The unqualified case (``object`` with no schema) is rejected: SQL Server
+    object identity is schema-scoped, so a bare name is ambiguous.  Raises
+    ValueError on a malformed identifier so the caller can surface a clear error.
+    """
+    if not entry_point or not entry_point.strip():
+        raise ValueError("entry_point must be a non-empty object identifier")
+
+    parts = entry_point.split(".")
+    if entry_type == "column":
+        if len(parts) != 3:
+            raise ValueError(
+                f"column entry_point must be 'schema.table.column', got {entry_point!r}"
+            )
+        schema, table, column = parts
+        return schema, table, column
+
+    # table / function / procedure
+    if len(parts) != 2:
+        raise ValueError(
+            f"{entry_type} entry_point must be 'schema.object', got {entry_point!r}"
+        )
+    schema, name = parts
+    return schema, name, None
+
+
+def _in_clause(count: int) -> str:
+    """Return a comma-separated run of ``count`` pyodbc parameter markers."""
+    return ", ".join("?" for _ in range(count)) if count else "NULL"
+
+
+def _fetch_rows_in(
+    cursor: "pyodbc.Cursor",
+    sql_template: str,
+    object_ids: "list[int]",
+    repeats: int = 1,
+) -> list[dict[str, Any]]:
+    """Run an ``IN (...)``-filtered query for a frontier of object_ids.
+
+    ``sql_template`` contains one or more ``{placeholders}`` slots; each is
+    expanded to a parameter run matching ``object_ids`` and the id list is bound
+    ``repeats`` times (queries that filter on two columns — e.g. FK parent OR
+    referenced — embed the placeholder twice and pass repeats=2).  An empty
+    frontier yields no rows without touching the database.
+    """
+    if not object_ids:
+        return []
+    placeholders = _in_clause(len(object_ids))
+    sql = sql_template.format(placeholders=placeholders)
+    # Derive the bind-repeat count from the template itself (source of truth) so
+    # a future edit that adds a {placeholders} slot can't silently misbind params.
+    repeats = sql_template.count("{placeholders}") or repeats
+    params = list(object_ids) * repeats
+    cursor.execute(sql, *params)
+    columns = [description[0] for description in cursor.description]
+    return [dict(zip(columns, row)) for row in cursor.fetchall()]
+
+
+def _resolve_entry_object_id(
+    cursor: "pyodbc.Cursor",
+    schema: str,
+    name: str,
+    entry_type: str,
+) -> "int | None":
+    """Resolve a table/routine name to its object_id (column uses its table).
+
+    Returns None when the object does not exist in the (non-shipped) catalog, so
+    the caller can return an empty-but-well-formed graph rather than raising.
+    """
+    if entry_type in ("table", "column"):
+        cursor.execute(RESOLVE_TABLE_OBJECT_ID_SQL, schema, name)
+    else:  # function / procedure
+        cursor.execute(RESOLVE_ROUTINE_OBJECT_ID_SQL, schema, name)
+    row = cursor.fetchone()
+    return int(row[0]) if row else None
+
+
+def _discover_object_ids(
+    cursor: "pyodbc.Cursor",
+    seed_object_id: int,
+    max_depth: int,
+) -> set[int]:
+    """Bounded BFS from the seed object_id over FK + dependency edges.
+
+    Returns the set of object_ids within ``max_depth`` hops of the seed
+    (inclusive of the seed).  Each hop issues WHERE-filtered FK and dependency
+    queries against the CURRENT frontier only, so the database — not Python —
+    does the pruning.  Edges are followed in both directions:
+
+      * FK:         parent table  <-> referenced table
+      * dependency: referencing routine <-> referenced table
+
+    so a depth-1 neighborhood of a table includes the tables it references, the
+    tables that reference it, and the routines that read it (and vice versa).
+    ``max_depth <= 0`` returns just the seed.
+    """
+    discovered: set[int] = {seed_object_id}
+    frontier: set[int] = {seed_object_id}
+
+    for _ in range(max(0, max_depth)):
+        if not frontier:
+            break
+        frontier_ids = sorted(frontier)
+
+        neighbors: set[int] = set()
+
+        # FK edges touching the frontier (parent OR referenced side).
+        for fk in _fetch_rows_in(
+            cursor, FOREIGN_KEYS_FILTERED_SQL, frontier_ids, repeats=2
+        ):
+            neighbors.add(int(fk["parent_object_id"]))
+            neighbors.add(int(fk["referenced_object_id"]))
+
+        # Dependency edges touching the frontier (referencing routine OR
+        # referenced table side).
+        for dep in _fetch_rows_in(
+            cursor, DEPENDENCIES_FILTERED_SQL, frontier_ids, repeats=2
+        ):
+            neighbors.add(int(dep["referencing_object_id"]))
+            ref_object_id = dep.get("referenced_object_id")
+            if ref_object_id is not None:
+                neighbors.add(int(ref_object_id))
+
+        new_ids = neighbors - discovered
+        discovered |= new_ids
+        frontier = new_ids
+
+    return discovered
+
+
+def build_targeted_graph_data(
+    connection: "pyodbc.Connection",
+    entry_point: str,
+    entry_type: str,
+    max_depth: int = 1,
+    include_definitions: bool = False,
+) -> dict[str, Any]:
+    """Importable core: build a BOUNDED neighborhood graph and return the dict.
+
+    Starting from ``entry_point`` (resolved via ``entry_type``), expand outward
+    up to ``max_depth`` hops over FK and routine-dependency edges, fetching only
+    the rows for the discovered object set via WHERE-filtered catalog queries.
+    The discovered rows feed the UNCHANGED build_graph() + graph_to_json(), so
+    the result is byte-/shape-identical to the full build — just a subset.
+
+    Semantics:
+        * ``max_depth == 0`` -> the entry object only (plus its own columns when
+          the entry is a table; a column entry still includes its parent table's
+          columns so the column node and its Stores edge are present).
+        * A missing entry object yields an empty-but-well-formed graph (no
+          nodes/edges) rather than an error.
+
+    Does NOT touch the filesystem, the TTL cache, or db_graph.json — callers that
+    want the shared full-graph file use build_and_write().  ``connection`` is any
+    object exposing pyodbc's ``.cursor()`` (live connection or test stub).
+    """
+    if entry_type not in TARGETED_ENTRY_TYPES:
+        raise ValueError(
+            f"entry_type must be one of {TARGETED_ENTRY_TYPES}, got {entry_type!r}"
+        )
+
+    schema, name, _column = _split_entry_point(entry_point, entry_type)
+
+    cursor = connection.cursor()
+    seed_object_id = _resolve_entry_object_id(cursor, schema, name, entry_type)
+
+    if seed_object_id is None:
+        # Unknown entry object: return an empty graph with the same shape.
+        empty = build_graph(
+            tables=[],
+            columns=[],
+            primary_keys=[],
+            foreign_keys=[],
+            routines=[],
+            dependencies=[],
+            include_definitions=include_definitions,
+        )
+        return graph_to_json(empty)
+
+    object_ids = sorted(_discover_object_ids(cursor, seed_object_id, max_depth))
+
+    # Assemble the final row lists over the FULL discovered set with one filtered
+    # query each — the build then runs over exactly this neighborhood.
+    tables = _fetch_rows_in(cursor, TABLES_FILTERED_SQL, object_ids)
+    columns = _fetch_rows_in(cursor, COLUMNS_FILTERED_SQL, object_ids)
+    primary_keys = _fetch_rows_in(cursor, PRIMARY_KEYS_FILTERED_SQL, object_ids)
+    foreign_keys = _fetch_rows_in(
+        cursor, FOREIGN_KEYS_FILTERED_SQL, object_ids, repeats=2
+    )
+    routines = _fetch_rows_in(cursor, ROUTINES_FILTERED_SQL, object_ids)
+    dependencies = _fetch_rows_in(
+        cursor, DEPENDENCIES_FILTERED_SQL, object_ids, repeats=2
+    )
+
+    graph = build_graph(
+        tables=tables,
+        columns=columns,
+        primary_keys=primary_keys,
+        foreign_keys=foreign_keys,
+        routines=routines,
+        dependencies=dependencies,
+        include_definitions=include_definitions,
+    )
+    return graph_to_json(graph)
+
+
+def build_and_write(
+    connection: "pyodbc.Connection",
+    output_dir: Path,
+    include_definitions: bool = False,
+    include_html: bool = False,
+) -> nx.MultiDiGraph:
+    """Importable core: read the schema and write db_graph.{json,md,graphml}.
+
+    Returns the built NetworkX graph so callers can derive summaries (the CLI
+    prints node/edge counts).  `include_html` is accepted for API symmetry with
+    the data-only tool path; HTML generation lives in build_graph_html.py and is
+    intentionally not done here, so this path never imports pyvis.  The Flask UI
+    builds the HTML via its own step.
+    """
+    cursor = connection.cursor()
+    rows = fetch_schema(cursor)
+    graph = build_graph(
+        tables=rows["tables"],
+        columns=rows["columns"],
+        primary_keys=rows["primary_keys"],
+        foreign_keys=rows["foreign_keys"],
+        routines=rows["routines"],
+        dependencies=rows["dependencies"],
+        include_definitions=include_definitions,
+    )
+    write_outputs(graph, Path(output_dir))
+    return graph
+
+
 def main() -> int:
     args = parse_args()
 
@@ -771,7 +1356,16 @@ def main() -> int:
         )
         return 2
 
+    if args.entry_point and not args.entry_type:
+        print(
+            "Error: --entry-type is required when --entry-point is given.",
+            file=sys.stderr,
+        )
+        return 2
+
     output_dir = Path(args.output_dir).expanduser().resolve()
+
+    pyodbc = _require_pyodbc()
 
     try:
         connection = pyodbc.connect(
@@ -783,30 +1377,68 @@ def main() -> int:
         print(f"Database connection failed: {exc}", file=sys.stderr)
         return 1
 
+    # Targeted (bounded-neighborhood) CLI build: write the scoped JSON only.
+    # The default (no --entry-point) full build below is unchanged.
+    if args.entry_point:
+        try:
+            data = build_targeted_graph_data(
+                connection,
+                entry_point=args.entry_point,
+                entry_type=args.entry_type,
+                max_depth=args.max_depth,
+                include_definitions=args.include_definitions,
+            )
+        except pyodbc.Error as exc:
+            print(f"Schema extraction failed: {exc}", file=sys.stderr)
+            return 1
+        except ValueError as exc:
+            print(f"Invalid entry point: {exc}", file=sys.stderr)
+            return 2
+        finally:
+            connection.close()
+
+        output_dir.mkdir(parents=True, exist_ok=True)
+        json_path = output_dir / "db_graph.json"
+        atomic_write_text(
+            json_path,
+            json.dumps(data, indent=2, sort_keys=False, ensure_ascii=False),
+        )
+
+        node_counts = Counter(n.get("node_type", "Unknown") for n in data["nodes"])
+        edge_counts = Counter(e.get("relationship", "Unknown") for e in data["edges"])
+        print("Targeted database graph built successfully.")
+        print(
+            f"Entry point: {args.entry_point} ({args.entry_type}), "
+            f"max depth: {args.max_depth}"
+        )
+        print(f"Output file: {json_path}")
+        print(
+            "Nodes: "
+            + ", ".join(
+                f"{kind}={node_counts[kind]}"
+                for kind in ("Table", "Column", "Function", "Procedure")
+            )
+        )
+        print(
+            "Relationships: "
+            + ", ".join(
+                f"{kind}={edge_counts[kind]}"
+                for kind in ("Stores", "Links", "Creates")
+            )
+        )
+        return 0
+
     try:
-        cursor = connection.cursor()
-        tables = fetch_rows(cursor, TABLES_SQL)
-        columns = fetch_rows(cursor, COLUMNS_SQL)
-        primary_keys = fetch_rows(cursor, PRIMARY_KEYS_SQL)
-        foreign_keys = fetch_rows(cursor, FOREIGN_KEYS_SQL)
-        routines = fetch_rows(cursor, ROUTINES_SQL)
-        dependencies = fetch_rows(cursor, DEPENDENCIES_SQL)
+        graph = build_and_write(
+            connection,
+            output_dir,
+            include_definitions=args.include_definitions,
+        )
     except pyodbc.Error as exc:
         print(f"Schema extraction failed: {exc}", file=sys.stderr)
         return 1
     finally:
         connection.close()
-
-    graph = build_graph(
-        tables=tables,
-        columns=columns,
-        primary_keys=primary_keys,
-        foreign_keys=foreign_keys,
-        routines=routines,
-        dependencies=dependencies,
-        include_definitions=args.include_definitions,
-    )
-    write_outputs(graph, output_dir)
 
     node_counts = Counter(
         attrs.get("node_type", "Unknown") for _, attrs in graph.nodes(data=True)

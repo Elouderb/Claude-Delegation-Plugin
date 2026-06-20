@@ -1,30 +1,89 @@
 """
 Database graph MCP tool implementations (tools 8-13).
 
-All tools require refresh_database_graph() to succeed before querying.
+Two build strategies are used, by tool:
+
+  * TARGETED (in-memory, bounded neighborhood) — db_get_table, db_get_column,
+    db_get_table_relationships, db_get_routine_dependencies.  These pass their
+    queried object as the entry point to build_targeted_database_graph() with a
+    sensible default depth and operate on the returned scoped dict.  They do NOT
+    write db_graph.json and do NOT use the TTL-cached full graph.
+
+  * FULL (TTL-cached file) — db_search_schema, db_find_relationship_path.  A
+    global search and an arbitrary two-endpoint path both need every object, so
+    these keep the unchanged refresh_database_graph() + load_database_graph()
+    flow against the shared, TTL-cached db_graph.json.
+
+The targeted entry-point default depths come from AGENT_OS_DB_GRAPH_DEPTH (a
+global override) with per-tool fallback constants below.
+
 Functions are imported by server.py and registered with @server.tool().
 """
 
+import os
 from collections import defaultdict
 from typing import Optional
 
 from graph_io import (
+    build_targeted_database_graph,
     format_graph_response,
     load_database_graph,
     log,
     refresh_database_graph,
 )
 
+# Per-tool default neighborhood depths for the targeted builds.  A single object
+# lookup needs only its immediate neighbors (depth 1); a routine's dependency
+# fan-out is one hop further to reach the columns of the tables it touches
+# (routine -> table -> columns), so it defaults to depth 2.
+_DEFAULT_TABLE_DEPTH = 1
+_DEFAULT_COLUMN_DEPTH = 1
+_DEFAULT_RELATIONSHIPS_DEPTH = 1
+_DEFAULT_ROUTINE_DEPTH = 2
+
+
+def _targeted_depth(default: int) -> int:
+    """Resolve a targeted-build depth: AGENT_OS_DB_GRAPH_DEPTH or the fallback.
+
+    AGENT_OS_DB_GRAPH_DEPTH, when set to a non-negative integer, overrides every
+    targeted tool's default depth (handy for widening the neighborhood without a
+    code change).  A blank, malformed, or negative value falls back to the
+    per-tool ``default``.
+    """
+    raw = os.environ.get("AGENT_OS_DB_GRAPH_DEPTH", "")
+    if raw.strip() == "":
+        return default
+    try:
+        value = int(raw)
+    except (ValueError, TypeError):
+        return default
+    return value if value >= 0 else default
+
+
+def _strip_type_prefix(node_id) -> str:
+    """Normalize a build-emitted node id to its bare ``schema.name``.
+
+    The build keys nodes as ``"<type>:<schema>.<name>"`` — e.g. ``table:dbo.Order``,
+    ``column:dbo.Order.Id``, ``procedure:dbo.MyProc`` (see build_db_graph.table_id /
+    column_id / routine_id). The tools receive the raw ``schema.name`` from the
+    caller, so strip the ``<type>:`` prefix before comparing. A no-op on ids that
+    have no prefix.
+    """
+    if not isinstance(node_id, str):
+        return ""
+    return node_id.split(":", 1)[1] if ":" in node_id else node_id
+
 
 def db_get_table(table_name: str) -> dict:
-    """Get table metadata, columns, keys, and relationships."""
-    try:
-        success, error = refresh_database_graph()
-        if not success:
-            return format_graph_response("database", {"table": table_name}, {},
-                                        [f"Graph refresh failed: {error}"])
+    """Get table metadata, columns, keys, and relationships.
 
-        graph_data = load_database_graph()
+    TARGETED build: scopes to the bounded neighborhood around ``table_name``
+    (default depth 1) instead of loading the whole-schema graph.
+    """
+    try:
+        graph_data = build_targeted_database_graph(
+            table_name, "table", _targeted_depth(_DEFAULT_TABLE_DEPTH)
+        )
         if not graph_data:
             return format_graph_response("database", {"table": table_name}, {},
                                         ["Database graph not found"])
@@ -34,7 +93,7 @@ def db_get_table(table_name: str) -> dict:
 
         table_node = None
         for node in nodes:
-            if node.get("id") == table_name and node.get("type") == "Table":
+            if _strip_type_prefix(node.get("id")) == table_name and node.get("type") == "Table":
                 table_node = node
                 break
 
@@ -48,14 +107,14 @@ def db_get_table(table_name: str) -> dict:
         outgoing_refs = []
 
         for edge in edges:
-            if edge.get("source") == table_name:
+            if _strip_type_prefix(edge.get("source")) == table_name:
                 outgoing_refs.append({
-                    "target": edge.get("target"),
+                    "target": _strip_type_prefix(edge.get("target")),
                     "relationship": edge.get("relationship")
                 })
-            elif edge.get("target") == table_name:
+            elif _strip_type_prefix(edge.get("target")) == table_name:
                 incoming_refs.append({
-                    "source": edge.get("source"),
+                    "source": _strip_type_prefix(edge.get("source")),
                     "relationship": edge.get("relationship")
                 })
 
@@ -70,14 +129,16 @@ def db_get_table(table_name: str) -> dict:
 
 
 def db_get_column(table_name: str, column_name: str) -> dict:
-    """Get column metadata, type, constraints, and dependencies."""
-    try:
-        success, error = refresh_database_graph()
-        if not success:
-            return format_graph_response("database", {"table": table_name, "column": column_name},
-                                        {}, [f"Graph refresh failed: {error}"])
+    """Get column metadata, type, constraints, and dependencies.
 
-        graph_data = load_database_graph()
+    TARGETED build: scopes to the bounded neighborhood around the column
+    ``table_name.column_name`` (default depth 1) instead of the whole schema.
+    """
+    try:
+        entry_point = f"{table_name}.{column_name}"
+        graph_data = build_targeted_database_graph(
+            entry_point, "column", _targeted_depth(_DEFAULT_COLUMN_DEPTH)
+        )
         if not graph_data:
             return format_graph_response("database", {"table": table_name, "column": column_name},
                                         {}, ["Database graph not found"])
@@ -87,7 +148,7 @@ def db_get_column(table_name: str, column_name: str) -> dict:
 
         col_node = None
         for node in nodes:
-            if node.get("id") == col_id and node.get("type") == "Column":
+            if _strip_type_prefix(node.get("id")) == col_id and node.get("type") == "Column":
                 col_node = node
                 break
 
@@ -140,14 +201,15 @@ def db_search_schema(query: str, object_type: Optional[str] = None) -> dict:
 
 
 def db_get_table_relationships(table_name: str) -> dict:
-    """Get table-level incoming and outgoing relationships with exact key-column pairs."""
-    try:
-        success, error = refresh_database_graph()
-        if not success:
-            return format_graph_response("database", {"table": table_name}, {},
-                                        [f"Graph refresh failed: {error}"])
+    """Get table-level incoming and outgoing relationships with exact key-column pairs.
 
-        graph_data = load_database_graph()
+    TARGETED build: scopes to the bounded neighborhood around ``table_name``
+    (default depth 1) instead of loading the whole-schema graph.
+    """
+    try:
+        graph_data = build_targeted_database_graph(
+            table_name, "table", _targeted_depth(_DEFAULT_RELATIONSHIPS_DEPTH)
+        )
         if not graph_data:
             return format_graph_response("database", {"table": table_name}, {},
                                         ["Database graph not found"])
@@ -157,15 +219,15 @@ def db_get_table_relationships(table_name: str) -> dict:
         outgoing = []
 
         for edge in edges:
-            if edge.get("source") == table_name:
+            if _strip_type_prefix(edge.get("source")) == table_name:
                 outgoing.append({
-                    "target": edge.get("target"),
+                    "target": _strip_type_prefix(edge.get("target")),
                     "relationship": edge.get("relationship"),
                     "metadata": edge.get("metadata", {})
                 })
-            elif edge.get("target") == table_name:
+            elif _strip_type_prefix(edge.get("target")) == table_name:
                 incoming.append({
-                    "source": edge.get("source"),
+                    "source": _strip_type_prefix(edge.get("source")),
                     "relationship": edge.get("relationship"),
                     "metadata": edge.get("metadata", {})
                 })
@@ -201,8 +263,10 @@ def db_find_relationship_path(table1: str, table2: str) -> dict:
             adj[src].append((tgt, edge.get("relationship"), edge.get("metadata", {})))
             adj[tgt].append((src, edge.get("relationship"), edge.get("metadata", {})))
 
-        # BFS
-        queue = [(table1, [table1], [])]
+        # BFS over prefixed node ids — the graph keys edges by "table:schema.name"
+        # / "column:...". Seed and goal use the table: prefix; strip it in output.
+        start, goal = f"table:{_strip_type_prefix(table1)}", f"table:{_strip_type_prefix(table2)}"
+        queue = [(start, [start], [])]
         paths = []
 
         while queue and len(paths) < 5:
@@ -211,8 +275,8 @@ def db_find_relationship_path(table1: str, table2: str) -> dict:
             if len(path) > 10:
                 continue
 
-            if node == table2:
-                paths.append({"path": path, "relationships": rels})
+            if node == goal:
+                paths.append({"path": [_strip_type_prefix(p) for p in path], "relationships": rels})
                 continue
 
             for neighbor, rel, meta in adj.get(node, []):
@@ -228,14 +292,18 @@ def db_find_relationship_path(table1: str, table2: str) -> dict:
 
 
 def db_get_routine_dependencies(routine_name: str) -> dict:
-    """Get tables and columns connected to a function or procedure."""
-    try:
-        success, error = refresh_database_graph()
-        if not success:
-            return format_graph_response("database", {"routine": routine_name},
-                                        {}, [f"Graph refresh failed: {error}"])
+    """Get tables and columns connected to a function or procedure.
 
-        graph_data = load_database_graph()
+    TARGETED build: scopes to the bounded neighborhood around ``routine_name``
+    (default depth 2 — one hop to the referenced tables, a second to reach their
+    columns) instead of loading the whole-schema graph.  The entry type is given
+    as ``procedure``; routine resolution is type-agnostic (it matches every
+    function/procedure type), so a function entry resolves identically.
+    """
+    try:
+        graph_data = build_targeted_database_graph(
+            routine_name, "procedure", _targeted_depth(_DEFAULT_ROUTINE_DEPTH)
+        )
         if not graph_data:
             return format_graph_response("database", {"routine": routine_name},
                                         {}, ["Database graph not found"])
@@ -244,18 +312,14 @@ def db_get_routine_dependencies(routine_name: str) -> dict:
         dependencies = {"tables": [], "columns": []}
 
         for edge in edges:
-            if edge.get("source") == routine_name and edge.get("relationship") == "Creates":
-                target = edge.get("target")
-                if "." in target:
-                    dependencies["columns"].append(target)
-                else:
-                    dependencies["tables"].append(target)
-            elif edge.get("target") == routine_name and edge.get("relationship") == "Uses":
-                source = edge.get("source")
-                if "." in source:
-                    dependencies["columns"].append(source)
-                else:
-                    dependencies["tables"].append(source)
+            if _strip_type_prefix(edge.get("source")) == routine_name and edge.get("relationship") == "Creates":
+                target = edge.get("target") or ""
+                bucket = "columns" if target.startswith("column:") else "tables"
+                dependencies[bucket].append(_strip_type_prefix(target))
+            elif _strip_type_prefix(edge.get("target")) == routine_name and edge.get("relationship") == "Uses":
+                source = edge.get("source") or ""
+                bucket = "columns" if source.startswith("column:") else "tables"
+                dependencies[bucket].append(_strip_type_prefix(source))
 
         return format_graph_response("database", {"routine": routine_name},
                                     {"dependencies": dependencies})
