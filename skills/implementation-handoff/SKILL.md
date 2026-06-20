@@ -1,6 +1,6 @@
 ---
 name: implementation-handoff
-description: Preload for the implementer agent; use when returning completed implementation work to the lead and reviewer.
+description: Preload for the implementer and complex-implementer agents; use when returning completed implementation work to the lead and reviewer.
 ---
 
 # Implementation Handoff

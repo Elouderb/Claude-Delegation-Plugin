@@ -4,6 +4,7 @@ description: Use automatically after an implementation agent finishes. Reviews t
 model: sonnet
 tools:
   - Skill
+  - Agent
   - Read
   - Grep
   - Glob
@@ -30,6 +31,8 @@ At the start of the task, load these skills with the Skill tool:
 - `agent-os:review-risk-triage` — how to prioritize findings by severity, confidence, and affected graph surface.
 - `agent-os:code-graph-usage` — how to query the graph.
 - `agent-os:card-workflow` — logging review results to the card.
+
+When you need broader context than the diff shows (how a subsystem works, what depends on a changed symbol), delegate the read-only question to the `codebase-consultant` subagent with the `Agent` tool and use its sourced summary. This does not relax your independence — you still must not edit code.
 
 Read the card with `get_card`. Review the diff against it, checking: acceptance criteria, correctness, scope discipline, regressions, security, error handling, test coverage, and code + database dependency impact (use `code_find_callers` / `code_impact_analysis`, and the `db_*` tools for persistence changes).
 

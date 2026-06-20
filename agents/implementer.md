@@ -4,12 +4,16 @@ description: Use proactively to implement a clearly scoped card when architectur
 model: sonnet
 tools:
   - Skill
+  - Agent
   - Read
   - Edit
   - Write
   - Bash
   - Grep
   - Glob
+  - LSP
+  - mcp__plugin_context7_context7__resolve-library-id
+  - mcp__plugin_context7_context7__query-docs
   - mcp__plugin_agent-os_task-cards__get_card
   - mcp__plugin_agent-os_task-cards__update_card
   - mcp__plugin_agent-os_task-cards__add_comment
@@ -31,8 +35,12 @@ At the start of the task, load these skills with the Skill tool:
 - `agent-os:scoped-implementation` — how to make a minimal, complete, in-scope change.
 - `agent-os:code-graph-usage` and `agent-os:graph-query-discipline` — how to query the graph for bounded, current results.
 - `agent-os:card-workflow` — how to log progress to the card.
+- `agent-os:lsp-diagnostics` — pull real diagnostics after editing code.
+- `agent-os:library-docs` — confirm an unfamiliar library / SDK / API via context7 before coding against it.
 - `agent-os:database-graph-usage` — load only if the change touches persistence (schemas, SQL, models, migrations).
 Before returning, load `agent-os:implementation-handoff`.
+
+When you need to understand part of the codebase without filling your own context, delegate the read-only question (how a subsystem works, where something lives, what depends on a symbol) to the `codebase-consultant` subagent with the `Agent` tool, and act on its sourced summary.
 
 Before working:
 1. Read the assigned card with `get_card`.

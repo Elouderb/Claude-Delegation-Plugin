@@ -51,10 +51,15 @@ Only the lead agent marks a card Complete.
 | Situation | Agent | Preloaded skill |
 |---|---|---|
 | Scoped coding with established architecture | `implementer` | `agent-os:scoped-implementation`, `agent-os:execute-card` |
+| Difficult/complex or repo-wide change (cross-module, large refactor, shared or central code) | `complex-implementer` (opus, high effort) | `agent-os:scoped-implementation`, `agent-os:execute-card` |
 | Review after every significant implementation | `code-reviewer` | `agent-os:independent-code-review`, `agent-os:review-risk-triage` |
 | Changed behavior, bug fixes, APIs, integrations, DB work | `test-engineer` | `agent-os:targeted-test-planning`, `agent-os:test-execution-reporting` |
 | Schema, migration, SQL, index, procedure, function, data-model work | `database-engineer` | `agent-os:migration-safety`, `agent-os:sql-routine-analysis` |
 | Unclear requirements or implementation choices | `research-planner` | `agent-os:architecture-research`, `agent-os:requirements-to-cards` |
+| Understand the codebase / answer a repo question without bloating context | `codebase-consultant` (read-only; the doing/reviewing agents can delegate to it via the `Agent` tool) | `agent-os:graph-file-discovery`, `agent-os:search-to-graph`, `agent-os:doc-review` |
+| UI / frontend work (components, styling, client behavior) | `frontend-engineer` | `frontend-design:frontend-design`, `agent-os:browser-verification`, `agent-os:lsp-diagnostics` |
+| Security review of a sensitive diff (auth, secrets, input, escaping, deps) | `security-reviewer` | `security-review`, `agent-os:review-risk-triage` |
+| Confirm a change works by running the real app / browser | `verification-engineer` | `agent-os:runtime-verification`, `agent-os:browser-verification` |
 
 The lead may code directly only when the change is trivial, delegation would cost more
 context than execution, or it is an urgent correction during integration.

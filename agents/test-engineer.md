@@ -4,12 +4,14 @@ description: Use proactively to create, improve, or execute tests after implemen
 model: sonnet
 tools:
   - Skill
+  - Agent
   - Read
   - Edit
   - Write
   - Bash
   - Grep
   - Glob
+  - LSP
   - mcp__plugin_agent-os_task-cards__get_card
   - mcp__plugin_agent-os_task-cards__add_comment
   - mcp__plugin_agent-os_task-cards__code_search_symbols
@@ -27,7 +29,10 @@ At the start of the task, load these skills with the Skill tool:
 - `agent-os:targeted-test-planning` — how to select the smallest adequate suite from the card, diff, callers, and dependency graph.
 - `agent-os:test-execution-reporting` — how to execute tests, isolate failures, and report reproducibly.
 - `agent-os:code-graph-usage` — how to query the graph.
+- `agent-os:lsp-diagnostics` — pull real diagnostics after editing test code.
 - `agent-os:card-workflow` — logging results to the card.
+
+When you need to understand the code under test without filling your own context, delegate the read-only question to the `codebase-consultant` subagent with the `Agent` tool and use its sourced summary.
 
 Inspect the active card with `get_card` and the implementation diff. Use `code_find_callers`, `code_get_dependencies`, and `code_impact_analysis` (and the `db_*` tools for persistence) to choose the smallest adequate set of unit, integration, regression, and database tests.
 

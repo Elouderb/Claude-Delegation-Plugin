@@ -4,6 +4,76 @@ All notable changes to the **agent-os** plugin are documented here. The format i
 based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/), and this project
 adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.1.13] - 2026-06-19
+
+### Added
+- **Three specialist agents** that fill previously-idle capability gaps so the
+  lead can delegate every domain:
+  - **`frontend-engineer`** (sonnet) — owns UI work; wired to the
+    `frontend-design` skill, the **playwright** browser MCP, the **LSP** servers,
+    and **context7** for framework docs.
+  - **`security-reviewer`** (sonnet, `effort: high`) — read-only review of
+    security-sensitive diffs via the **security-guidance** plugin and the
+    `/security-review` skill.
+  - **`verification-engineer`** (sonnet) — runs the real app / browser
+    (`verify`, `run`, playwright) to confirm behavior, distinct from
+    `test-engineer`'s suites.
+- **Four cross-cutting skills**: `lsp-diagnostics` (pull LSP diagnostics after
+  edits), `library-docs` (fetch current docs via context7 before coding against
+  an unfamiliar dependency), `browser-verification` (drive the UI via
+  playwright), and `runtime-verification` (run the real app via verify/run).
+
+### Changed
+- The implementers and testers now reach idle tooling: `implementer`,
+  `complex-implementer`, `test-engineer`, and `database-engineer` gained the
+  `LSP` tool and load `lsp-diagnostics`; the two implementers also gained
+  **context7** and load `library-docs`. Agent count 7→10, skill count 20→24;
+  delegation rules in `templates/CLAUDE.md` updated.
+
+## [0.1.12] - 2026-06-19
+
+### Added
+- **`complex-implementer` agent** (`model: opus`, `effort: xhigh`) for difficult,
+  architecturally significant, or repo-wide changes — large refactors, new
+  subsystems, edits to shared/central code. It maps blast radius with the code
+  graph (`code_impact_analysis` / `code_find_callers` / `graph_get_subgraph`)
+  before editing and plans coherent multi-file changes. `implementer` (sonnet)
+  remains the default for simple, well-scoped work. Routed via the delegation
+  rules in `templates/CLAUDE.md` and the `execute-card` skill.
+- **`codebase-consultant` agent** (`model: sonnet`, `effort: medium`) — a
+  read-only repository investigator. Delegate "how does X work / where is Y /
+  what depends on Z / is this doc current" questions to it and the heavy
+  searching and file reading happen in ITS context, returning a tight, sourced
+  answer (`file:line` + graph node IDs) instead of bloating the caller's
+  context. Ships three skills: `graph-file-discovery` (graph-first),
+  `search-to-graph` (grep/tree → graph), and `doc-review` (audit docs against
+  the code). The five doing/reviewing agents (`implementer`,
+  `complex-implementer`, `code-reviewer`, `test-engineer`, `database-engineer`)
+  gained the `Agent` tool so they can delegate to it as a nested subagent
+  (Claude Code supports subagent nesting to depth 5).
+
+### Changed
+- Skills `card-workflow`, `graph-query-discipline`, and `sql-routine-analysis`
+  now explicitly point to the repository **code graph** for scoping and impact
+  (the dedicated database-graph skills were intentionally left focused on the DB
+  graph). The five existing agents already referenced the code graph.
+
+## [0.1.11] - 2026-06-19
+
+### Fixed
+- **Card writes no longer flip to read-only after `cards.sqlite` is replaced.**
+  The server previously opened one SQLite connection at startup and held it for
+  the whole process; when the database file's inode was swapped underneath it (a
+  git operation touching `.agent-os/`, an external rewrite, or delete+recreate),
+  SQLite returned `SQLITE_READONLY_DBMOVED` and every subsequent card write
+  failed read-only. `card_tools` now opens a fresh short-lived connection per
+  operation from a fixed path — which always resolves to the current file — and
+  re-ensures the schema on each connect, so a replaced or empty file self-heals.
+  `server.py` no longer keeps a long-lived card connection (`shutdown_db` only
+  stops the graph server now). Storage location is unchanged
+  (`<repo>/.agent-os/cards.sqlite`); no migration needed. Regression test:
+  `mcp/tests/test_card_db_resilience.py`.
+
 ## [0.1.10] - 2026-06-19
 
 ### Added

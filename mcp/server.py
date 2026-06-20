@@ -26,7 +26,6 @@ focused sub-modules:
 """
 
 import atexit
-import sqlite3
 import sys
 from pathlib import Path
 from typing import Optional
@@ -49,8 +48,9 @@ from graph_server import start_graph_server, _check_graph_server_health
 # Initialize FastMCP server
 server = FastMCP("task-cards")
 
-# Global database connection (initialized in setup)
-db_conn: Optional[sqlite3.Connection] = None
+# Resolved path to the repo-local card database.  Card operations open their own
+# short-lived connection per call (see card_tools._connect), so the server holds
+# no long-lived handle that could be stranded when cards.sqlite is replaced.
 db_path: Optional[Path] = None
 
 # Allowed card lifecycle states (kept for any external consumer that imports it)
@@ -58,11 +58,17 @@ VALID_STATUSES = ("Created", "In Progress", "Complete")
 
 
 def ensure_agent_os():
-    """Ensure .agent-os directory and database exist."""
-    global db_conn, db_path
+    """Ensure the .agent-os directory and card database schema exist.
+
+    Resolves the repo-local card database path and hands it to card_tools, which
+    opens a fresh connection per operation.  The schema is created up front (and
+    re-ensured on every connection) so a missing or replaced cards.sqlite file
+    self-heals instead of stranding a long-lived read-only handle.
+    """
+    global db_path
 
     try:
-        log("Initializing database connection...")
+        log("Initializing database...")
 
         # Find repo root by looking for .git first, then use current directory
         current_dir = Path.cwd()
@@ -82,43 +88,12 @@ def ensure_agent_os():
         log(f"Agent OS directory: {agent_os_dir}")
 
         db_path = agent_os_dir / "cards.sqlite"
-        # check_same_thread=False is safe here because MCP runs in a single-threaded event loop.
-        # The FastMCP framework serializes all tool calls through a single event loop,
-        # so concurrent access from multiple threads is not possible.
-        db_conn = sqlite3.connect(str(db_path), check_same_thread=False)
-        db_conn.row_factory = sqlite3.Row
-        log(f"Database connected: {db_path}")
 
-        # Create tables if they don't exist
-        cursor = db_conn.cursor()
-
-        cursor.execute("""
-        CREATE TABLE IF NOT EXISTS cards (
-            card_id TEXT PRIMARY KEY,
-            title TEXT NOT NULL,
-            description TEXT,
-            status TEXT NOT NULL,
-            priority TEXT,
-            created_at TIMESTAMP,
-            updated_at TIMESTAMP
-        )
-        """)
-
-        cursor.execute("""
-        CREATE TABLE IF NOT EXISTS card_comments (
-            comment_id INTEGER PRIMARY KEY AUTOINCREMENT,
-            card_id TEXT NOT NULL,
-            author TEXT,
-            comment TEXT,
-            created_at TIMESTAMP
-        )
-        """)
-
-        db_conn.commit()
-        log("Database tables initialized successfully")
-
-        # Inject the live connection into card_tools so its functions can use it.
-        card_tools.set_db_conn(db_conn)
+        # Point card_tools at the path (it opens a short-lived connection per
+        # call) and create the file + schema once up front.
+        card_tools.set_db_path(db_path)
+        card_tools.init_db()
+        log(f"Database ready (per-operation connections): {db_path}")
 
         # Start the graph server after database initialization
         start_graph_server()
@@ -129,19 +104,12 @@ def ensure_agent_os():
 
 
 def shutdown_db():
-    """Properly close the database connection on shutdown."""
-    global db_conn
+    """Shut down the graph server.
 
-    # Shutdown Flask process
+    Card operations use short-lived per-call connections, so there is no
+    long-lived card-database handle to close here.
+    """
     graph_server.shutdown_flask()
-
-    # Close database connection
-    if db_conn:
-        try:
-            db_conn.close()
-            log("Database connection closed")
-        except Exception as e:
-            log(f"ERROR closing database: {e}")
 
 
 # Register shutdown handler
