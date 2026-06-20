@@ -4,6 +4,31 @@ All notable changes to the **agent-os** plugin are documented here. The format i
 based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/), and this project
 adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.1.14] - 2026-06-20
+
+### Security
+- **Graph UI: failed refreshes no longer leak subprocess output (or DB credentials).**
+  `/<slug>/refresh/repo` and `/<slug>/refresh/db` previously returned the subprocess
+  `stdout`/`stderr` in their 500 response; a failed DB refresh could echo
+  `DB_CONNECTION_STRING` to the caller. Output is now logged server-side and the
+  DB endpoint withholds it entirely (it may contain credentials).
+- **Graph UI: CSRF guard on the refresh POST endpoints.** A `before_request` hook
+  requires an `X-Requested-With: XMLHttpRequest` header on state-changing requests,
+  so a forged cross-site POST can no longer trigger `graphify` or the DB build. The
+  in-page refresh buttons send the header. (No authentication was added and the
+  bind stays `0.0.0.0` — the deployment is an intentionally trusted LAN.)
+
+  Both fixes came from an independent `security-reviewer` agent pass; XSS escaping,
+  SQL, path-traversal, command-injection, and SSRF surfaces were reviewed and found
+  clean. Regression tests added in `mcp/tests/test_flask_app.py`.
+
+### Fixed (documentation)
+- Root `CLAUDE.md` now states it documents the task-cards subsystem and points to
+  `README.md` / `templates/CLAUDE.md` for the full plugin and operating model.
+- `README.md` distinguishes `CLAUDE.md` (card tools) from `templates/CLAUDE.md`
+  (operating model) and notes the `mcp/tests/` CI suite alongside `test_server.py`.
+- Removed the unimplemented `config.toml` from the `INTEGRATION.md` layout diagram.
+
 ## [0.1.13] - 2026-06-19
 
 ### Added

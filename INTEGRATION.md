@@ -137,7 +137,6 @@ After first use, each repository will have:
 your-repo/
   .agent-os/
     cards.sqlite     ← Task data (auto-created)
-    config.toml      ← Optional: server config
   CLAUDE.md
   ...other files...
 ```

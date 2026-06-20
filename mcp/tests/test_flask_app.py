@@ -16,6 +16,7 @@ from __future__ import annotations
 import json
 import os
 import sqlite3
+import subprocess
 import sys
 import tempfile
 import unittest
@@ -301,6 +302,91 @@ class TestXssSlugInNotFoundPage(_AppTestCase):
         self.assertNotIn("<script>bad()</script>", body)
         self.assertIn("&lt;script&gt;", body)
         self.assertEqual(response.status_code, 404)
+
+
+class TestRefreshSecurity(_AppTestCase):
+    """H1 (CSRF) + H2/M1 (no subprocess-output leak) on the refresh POST endpoints."""
+
+    def test_post_without_xrw_header_is_forbidden(self):
+        # A state-changing POST lacking X-Requested-With is rejected by the CSRF
+        # guard before reaching the view (so no subprocess can run).
+        self.assertEqual(self.client.post("/my-repo/refresh/repo").status_code, 403)
+        self.assertEqual(self.client.post("/my-repo/refresh/db").status_code, 403)
+
+    def test_post_with_xrw_header_passes_csrf_guard(self):
+        # With the header the guard lets the request through to the view, which
+        # 404s for an unknown slug — proving the 403 above came from the guard,
+        # not from routing.
+        with self._patch_slug("my-repo", None):
+            resp = self.client.post(
+                "/nonexistent/refresh/repo",
+                headers={"X-Requested-With": "XMLHttpRequest"},
+            )
+        self.assertEqual(resp.status_code, 404)
+
+    def test_refresh_repo_failure_does_not_leak_subprocess_output(self):
+        # H2/M1: a failed refresh must not return subprocess stdout/stderr to the
+        # caller (for the DB build that output can contain DB_CONNECTION_STRING).
+        secret = "Server=db;Uid=admin;Pwd=SUPERSECRET"
+        err = subprocess.CalledProcessError(
+            returncode=1, cmd=["graphify", "update", ".", "--force"],
+            output="stdout noise", stderr=secret,
+        )
+        with tempfile.TemporaryDirectory() as tmpdir:
+            with self._patch_slug("my-repo", Path(tmpdir)), \
+                 patch.object(flask_app_module.subprocess, "run", side_effect=err):
+                resp = self.client.post(
+                    "/my-repo/refresh/repo",
+                    headers={"X-Requested-With": "XMLHttpRequest"},
+                )
+        self.assertEqual(resp.status_code, 500)
+        body = resp.data.decode()
+        self.assertNotIn(secret, body)
+        self.assertNotIn("stderr", body)
+        self.assertNotIn("stdout", body)
+
+    def test_refresh_db_failure_does_not_leak_credentials(self):
+        # H2/M1 for the DB endpoint: neither the connection string nor the build
+        # stderr may reach the caller.
+        secret = "Server=db;Uid=admin;Pwd=SUPERSECRET"
+        err = subprocess.CalledProcessError(
+            returncode=1, cmd=["python", "build_db_graph.py"],
+            output="stdout noise", stderr=secret,
+        )
+        with tempfile.TemporaryDirectory() as tmpdir:
+            with self._patch_slug("my-repo", Path(tmpdir)), \
+                 patch.dict(os.environ, {"DB_CONNECTION_STRING": secret}), \
+                 patch.object(flask_app_module.subprocess, "run", side_effect=err):
+                resp = self.client.post(
+                    "/my-repo/refresh/db",
+                    headers={"X-Requested-With": "XMLHttpRequest"},
+                )
+        self.assertEqual(resp.status_code, 500)
+        body = resp.data.decode()
+        self.assertNotIn(secret, body)
+        self.assertNotIn("stderr", body)
+
+    def test_refresh_db_success_does_not_leak_credentials(self):
+        # H2/M1 success path: a successful build whose stdout echoes the
+        # connection string must not surface it in the response body.
+        secret = "Server=db;Uid=admin;Pwd=SUPERSECRET"
+        ok = subprocess.CompletedProcess(
+            args=["python", "build_db_graph.py"], returncode=0,
+            stdout=f"connected to {secret}", stderr="",
+        )
+        with tempfile.TemporaryDirectory() as tmpdir:
+            with self._patch_slug("my-repo", Path(tmpdir)), \
+                 patch.dict(os.environ, {"DB_CONNECTION_STRING": secret}), \
+                 patch.object(flask_app_module.subprocess, "run", return_value=ok):
+                resp = self.client.post(
+                    "/my-repo/refresh/db",
+                    headers={"X-Requested-With": "XMLHttpRequest"},
+                )
+        self.assertEqual(resp.status_code, 200)
+        body = resp.data.decode()
+        self.assertEqual(json.loads(body)["status"], "refreshed")
+        self.assertNotIn(secret, body)
+        self.assertNotIn("build_output", body)
 
 
 if __name__ == "__main__":

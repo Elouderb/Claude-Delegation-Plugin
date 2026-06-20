@@ -2,6 +2,8 @@
 
 Jira-style task management system for Claude Code and AI agents. Repository-local, SQLite-backed, built on the `mcp` Python package.
 
+> **Scope of this document:** this file documents the **task-cards MCP subsystem** (the 6 card tools, the SQLite schema, and the basic card workflow). It is one part of the larger **agent-os** plugin, which also ships the code/database knowledge-graph tools, lifecycle hooks, and a delegation-oriented set of agents and skills. For the full plugin overview and install, see [`README.md`](README.md); for the agent operating model and delegation rules, see [`templates/CLAUDE.md`](templates/CLAUDE.md).
+
 ## What This Is
 
 A lightweight task/card management system designed as an MCP server. It provides:

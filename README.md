@@ -1,6 +1,6 @@
 # Agent OS
 
-A repository-local "operating system" for agentic development in Claude Code, packaged as a Claude Code plugin (version `0.1.13`). It bundles task tracking, code/database knowledge graphs, lifecycle hooks, and a delegation-oriented set of agents and skills.
+A repository-local "operating system" for agentic development in Claude Code, packaged as a Claude Code plugin (version `0.1.14`). It bundles task tracking, code/database knowledge graphs, lifecycle hooks, and a delegation-oriented set of agents and skills.
 
 ## What's in the plugin
 
@@ -83,7 +83,8 @@ Cards are repository-local: each repo gets its own `.agent-os/cards.sqlite`, dis
 
 ## Documentation
 
-- `CLAUDE.md` — detailed tool reference and the recommended agent operating model.
+- `CLAUDE.md` — task-card tool reference (the 6 card tools, the SQLite schema, and the basic card workflow).
+- `templates/CLAUDE.md` — the agent operating model and delegation rules (the template installed into consuming repos).
 - `INTEGRATION.md` — project setup and workflow rules.
 - `hooks/README.md` — how the graph-sync hooks behave.
 - `CHANGELOG.md` — change history.
@@ -91,7 +92,8 @@ Cards are repository-local: each repo gets its own `.agent-os/cards.sqlite`, dis
 ## Testing
 
 ```bash
-cd mcp && python3 test_server.py   # exercises the 6 card tools (8/8)
+cd mcp && python3 test_server.py   # the 6 card tools (8/8)
+python3 -m pytest mcp/tests/       # full CI suite: code graph, Flask routes, hooks, DB resilience
 ```
 
 See `mcp/example_usage.py` for runnable usage patterns.
