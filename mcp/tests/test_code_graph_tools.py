@@ -41,8 +41,18 @@ _FIXTURE = Path(__file__).resolve().parent / "fixtures" / "graph_fixture.json"
 
 
 def _load_fixture():
+    """Load the on-disk graphify-format fixture and normalize it.
+
+    The fixture is stored in REAL graphify node-link format (top-level "links",
+    edges keyed "relation", nodes keyed "file_type"). The fixture-driven tests
+    below patch graph_io.load_code_graph() to return this dict directly,
+    bypassing the real loader. We therefore run it through the same
+    _normalize_code_graph() the real loader applies, so the injected data
+    matches what production code actually sees (edges/relationship/type aliases
+    present).
+    """
     with open(_FIXTURE) as fh:
-        return json.load(fh)
+        return graph_io._normalize_code_graph(json.load(fh))
 
 
 class TestLoadCodeGraphMissing(unittest.TestCase):
@@ -63,13 +73,16 @@ class TestLoadCodeGraphMissing(unittest.TestCase):
 
 
 class TestLoadCodeGraphPresent(unittest.TestCase):
-    """load_code_graph() loads and returns the fixture when the file exists."""
+    """load_code_graph() loads and normalizes the fixture when the file exists."""
 
     def setUp(self):
         self._tmpdir = tempfile.mkdtemp()
         outdir = Path(self._tmpdir) / "graphify-out"
         outdir.mkdir()
-        (outdir / "graph.json").write_text(json.dumps(_load_fixture()))
+        # Write the RAW (un-normalized) graphify-format fixture to disk so the
+        # real loader exercises the links->edges normalization path end to end.
+        with open(_FIXTURE) as fh:
+            (outdir / "graph.json").write_text(fh.read())
 
     def tearDown(self):
         import shutil
@@ -85,8 +98,82 @@ class TestLoadCodeGraphPresent(unittest.TestCase):
                 data = graph_io.load_code_graph()
         self.assertIsNotNone(data)
         self.assertIn("nodes", data)
+        # The on-disk fixture is in links-format (no top-level "edges"); the
+        # loader must synthesize "edges" from "links" during normalization.
         self.assertIn("edges", data)
         self.assertGreater(len(data["nodes"]), 0)
+        self.assertGreater(len(data["edges"]), 0)
+
+
+class TestGraphifyFormatNormalizationRegression(unittest.TestCase):
+    """Regression for code-graph traversal blindness against REAL graphify output.
+
+    graphify emits NetworkX node-link JSON: edges under top-level "links", each
+    edge keyed "relation", each node keyed "file_type". Before the
+    _normalize_code_graph() fix, the tools read "edges"/"relationship"/"type"
+    and so every traversal returned empty against real graphify output. This
+    test feeds a raw graphify-format graph through the REAL load_code_graph()
+    (no patching of load_code_graph itself) and asserts the loader bridges the
+    schema so traversal works. It fails before the fix, passes after.
+    """
+
+    # A minimal but real-shaped graphify node-link graph: top-level "links",
+    # edges use "relation", nodes use "file_type". No "edges"/"relationship"/
+    # "type" keys anywhere — exactly what graphify writes.
+    RAW_GRAPHIFY_GRAPH = {
+        "directed": False,
+        "multigraph": False,
+        "graph": {},
+        "nodes": [
+            {"id": "pkg.mod", "label": "mod", "file_type": "code",
+             "source_file": "pkg/mod.py", "source_location": "L1"},
+            {"id": "pkg.mod.callee", "label": "callee", "file_type": "code",
+             "source_file": "pkg/mod.py", "source_location": "L10"},
+            {"id": "pkg.mod.caller", "label": "caller", "file_type": "code",
+             "source_file": "pkg/mod.py", "source_location": "L20"},
+        ],
+        "links": [
+            {"source": "pkg.mod", "target": "pkg.mod.callee",
+             "relation": "contains", "weight": 1.0},
+            {"source": "pkg.mod.caller", "target": "pkg.mod.callee",
+             "relation": "calls", "weight": 1.0},
+        ],
+    }
+
+    def setUp(self):
+        self._tmpdir = tempfile.mkdtemp()
+        outdir = Path(self._tmpdir) / "graphify-out"
+        outdir.mkdir()
+        (outdir / "graph.json").write_text(json.dumps(self.RAW_GRAPHIFY_GRAPH))
+
+    def tearDown(self):
+        import shutil
+        shutil.rmtree(self._tmpdir, ignore_errors=True)
+
+    def test_real_loader_bridges_links_to_edges(self):
+        with patch.object(graph_io, "get_repo_root", return_value=Path(self._tmpdir)):
+            with patch.object(graph_server, "_check_graph_server_health"):
+                data = graph_io.load_code_graph()
+        self.assertIsNotNone(data)
+        # links -> edges, non-empty
+        self.assertIn("edges", data)
+        self.assertGreater(len(data["edges"]), 0)
+        # relation -> relationship on every edge
+        self.assertTrue(all("relationship" in e for e in data["edges"]))
+        self.assertIn("calls", [e["relationship"] for e in data["edges"]])
+        # file_type -> type on every node
+        self.assertTrue(all(n.get("type") == "code" for n in data["nodes"]))
+
+    def test_find_callers_nonempty_after_normalization(self):
+        # code_find_callers calls the real load_code_graph() internally; with
+        # get_repo_root patched it loads our raw graphify file and must return
+        # the caller on the "calls" edge. Before the fix this was empty.
+        with patch.object(graph_io, "get_repo_root", return_value=Path(self._tmpdir)):
+            with patch.object(graph_server, "_check_graph_server_health"):
+                result = code_graph_tools.code_find_callers("pkg.mod.callee", transitive=False)
+        callers = result["results"]["callers"]
+        caller_ids = [c["caller"] for c in callers]
+        self.assertIn("pkg.mod.caller", caller_ids)
 
 
 class _FixtureBase(unittest.TestCase):
@@ -118,13 +205,16 @@ class TestCodeSearchSymbols(_FixtureBase):
         symbols = result["results"]["symbols"]
         self.assertTrue(any("run" in s["label"] for s in symbols))
 
-    def test_type_filter_returns_only_functions(self):
-        result = code_graph_tools.code_search_symbols("func", symbol_type="function")
+    def test_type_filter_returns_only_code(self):
+        # graphify nodes carry file_type ("code"/"document"), normalized to
+        # node["type"]. The "func" query matches helper_func (file_type "code").
+        result = code_graph_tools.code_search_symbols("func", symbol_type="code")
         symbols = result["results"]["symbols"]
-        self.assertTrue(all(s["type"] == "function" for s in symbols))
+        self.assertTrue(all(s["type"] == "code" for s in symbols))
         self.assertGreater(len(symbols), 0)
 
     def test_type_filter_no_match_returns_empty(self):
+        # No node has file_type "class" — the filter must exclude everything.
         result = code_graph_tools.code_search_symbols("main", symbol_type="class")
         symbols = result["results"]["symbols"]
         self.assertEqual(symbols, [])
@@ -263,9 +353,12 @@ class TestGraphSearchNodesCode(_FixtureBase):
         self.assertGreater(len(nodes), 0)
 
     def test_type_filter(self):
-        result = shared_graph_tools.graph_search_nodes("myapp", graph="code", node_type="function", fuzzy=True)
+        # The four "myapp.*" nodes all have file_type "code" (normalized to
+        # node["type"]); tests.test_utils ("document") does not match "myapp".
+        result = shared_graph_tools.graph_search_nodes("myapp", graph="code", node_type="code", fuzzy=True)
         nodes = result["results"]["nodes"]
-        self.assertTrue(all(n["type"] == "function" for n in nodes))
+        self.assertGreater(len(nodes), 0)
+        self.assertTrue(all(n["type"] == "code" for n in nodes))
 
     def test_limit_applied(self):
         result = shared_graph_tools.graph_search_nodes("myapp", graph="code", fuzzy=True, limit=2)
@@ -377,15 +470,23 @@ class TestGraphStatus(unittest.TestCase):
         self.assertFalse(result["results"]["exists"])
 
     def test_present_file_reports_counts(self):
+        # graph_status() reads graph.json RAW (it does not call load_code_graph),
+        # but counts links-or-edges, so a real graphify links-format file reports
+        # both node_count and edge_count correctly.
         with tempfile.TemporaryDirectory() as tmpdir:
             outdir = Path(tmpdir) / "graphify-out"
             outdir.mkdir()
-            (outdir / "graph.json").write_text(json.dumps(_load_fixture()))
+            with open(_FIXTURE) as fh:
+                raw = fh.read()
+            (outdir / "graph.json").write_text(raw)
             with patch.object(graph_io, "get_repo_root", return_value=Path(tmpdir)):
                 result = shared_graph_tools.graph_status(graph="code")
         self.assertTrue(result["results"]["exists"])
         self.assertGreater(result["results"]["node_count"], 0)
-        self.assertEqual(result["results"]["edge_count"], 3)
+        # The 4 edges are stored under the graphify "links" key; graph_status
+        # counts links-or-edges, so they are reported.
+        self.assertEqual(result["results"]["edge_count"], 4)
+        self.assertEqual(len(json.loads(raw)["links"]), 4)
 
 
 class TestDbToolsSkipped(unittest.TestCase):
