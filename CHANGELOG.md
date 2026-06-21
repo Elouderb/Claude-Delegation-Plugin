@@ -4,6 +4,28 @@ All notable changes to the **agent-os** plugin are documented here. The format i
 based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/), and this project
 adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.2.3] - 2026-06-21
+
+### Added
+- **Clickable task cards → card detail page in the graph UI.** Cards in the
+  Flask task-cards list (`/<slug>/task_cards`) now link to a new
+  `GET /<slug>/task_cards/<card_id>` detail page showing the card's full
+  contents: title, status badge, priority, created/updated timestamps, the full
+  description (whitespace preserved), and the `card_comments` work-log thread
+  (author + timestamp + body, oldest→newest). Rows are clickable (title link +
+  row affordance) and the detail page breadcrumbs back to the list. Empty
+  description / zero comments render graceful placeholders; an unknown `card_id`
+  or missing database returns a friendly 404, and a read error returns a generic
+  500 with stderr-only logging.
+
+### Security
+- The detail route uses parameterized SQL (`WHERE card_id = ?`), `escape()`s
+  every DB-sourced field (descriptions and comments are free-text XSS sinks), and
+  `urllib.parse.quote(safe="")`s the slug and `card_id` in the `href`/`onclick`
+  so neither can break out of the JS string or HTML attribute. It is a read-only
+  `GET`, so the existing `X-Requested-With` CSRF guard is unaffected. The SQLite
+  connection is closed on every path via `try/finally`.
+
 ## [0.2.2] - 2026-06-20
 
 ### Fixed

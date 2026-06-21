@@ -389,5 +389,203 @@ class TestRefreshSecurity(_AppTestCase):
         self.assertNotIn("build_output", body)
 
 
+class TestTaskCardDetailRoute(_AppTestCase):
+    """Tests for GET /<slug>/task_cards/<card_id> — the card detail page."""
+
+    def _setup_db(self, tmpdir: str) -> Path:
+        """Create a minimal cards.sqlite with both tables."""
+        root = Path(tmpdir)
+        agent_os = root / ".agent-os"
+        agent_os.mkdir(parents=True)
+        db_path = agent_os / "cards.sqlite"
+        conn = sqlite3.connect(str(db_path))
+        conn.execute("""
+            CREATE TABLE cards (
+                card_id TEXT PRIMARY KEY,
+                title TEXT NOT NULL,
+                description TEXT,
+                status TEXT NOT NULL,
+                priority TEXT,
+                created_at TIMESTAMP,
+                updated_at TIMESTAMP
+            )
+        """)
+        conn.execute("""
+            CREATE TABLE card_comments (
+                comment_id INTEGER PRIMARY KEY AUTOINCREMENT,
+                card_id TEXT NOT NULL,
+                author TEXT,
+                comment TEXT,
+                created_at TIMESTAMP
+            )
+        """)
+        conn.commit()
+        conn.close()
+        return root
+
+    def _insert_card(self, db_path: Path, card_id="abc12345", title="Test Card",
+                     description="A description", status="In Progress",
+                     priority="high"):
+        conn = sqlite3.connect(str(db_path))
+        conn.execute(
+            "INSERT INTO cards VALUES (?,?,?,?,?,?,?)",
+            (card_id, title, description, status, priority,
+             "2026-01-01T00:00:00", "2026-01-02T00:00:00"),
+        )
+        conn.commit()
+        conn.close()
+
+    def _insert_comment(self, db_path: Path, card_id="abc12345",
+                        author="agent", comment="Did a thing",
+                        created_at="2026-01-01T01:00:00"):
+        conn = sqlite3.connect(str(db_path))
+        conn.execute(
+            "INSERT INTO card_comments(card_id, author, comment, created_at) VALUES (?,?,?,?)",
+            (card_id, author, comment, created_at),
+        )
+        conn.commit()
+        conn.close()
+
+    # --- 200 cases ---
+
+    def test_known_card_returns_200(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = self._setup_db(tmpdir)
+            self._insert_card(root / ".agent-os" / "cards.sqlite")
+            with self._patch_slug("my-repo", root):
+                resp = self.client.get("/my-repo/task_cards/abc12345")
+        self.assertEqual(resp.status_code, 200)
+
+    def test_detail_page_shows_title(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = self._setup_db(tmpdir)
+            self._insert_card(root / ".agent-os" / "cards.sqlite")
+            with self._patch_slug("my-repo", root):
+                resp = self.client.get("/my-repo/task_cards/abc12345")
+        self.assertIn("Test Card", resp.data.decode())
+
+    def test_detail_page_shows_description(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = self._setup_db(tmpdir)
+            self._insert_card(root / ".agent-os" / "cards.sqlite", description="Detailed description here")
+            with self._patch_slug("my-repo", root):
+                resp = self.client.get("/my-repo/task_cards/abc12345")
+        self.assertIn("Detailed description here", resp.data.decode())
+
+    def test_empty_description_shows_placeholder(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = self._setup_db(tmpdir)
+            self._insert_card(root / ".agent-os" / "cards.sqlite", description=None)
+            with self._patch_slug("my-repo", root):
+                resp = self.client.get("/my-repo/task_cards/abc12345")
+        self.assertIn("No description", resp.data.decode())
+
+    def test_detail_page_shows_status_badge(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = self._setup_db(tmpdir)
+            self._insert_card(root / ".agent-os" / "cards.sqlite", status="Complete")
+            with self._patch_slug("my-repo", root):
+                resp = self.client.get("/my-repo/task_cards/abc12345")
+        self.assertIn("Complete", resp.data.decode())
+
+    def test_detail_page_shows_comment(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = self._setup_db(tmpdir)
+            db_path = root / ".agent-os" / "cards.sqlite"
+            self._insert_card(db_path)
+            self._insert_comment(db_path, comment="Started work")
+            with self._patch_slug("my-repo", root):
+                resp = self.client.get("/my-repo/task_cards/abc12345")
+        self.assertIn("Started work", resp.data.decode())
+
+    def test_no_comments_shows_placeholder(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = self._setup_db(tmpdir)
+            self._insert_card(root / ".agent-os" / "cards.sqlite")
+            with self._patch_slug("my-repo", root):
+                resp = self.client.get("/my-repo/task_cards/abc12345")
+        self.assertIn("No work log yet", resp.data.decode())
+
+    def test_breadcrumb_links_to_list(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = self._setup_db(tmpdir)
+            self._insert_card(root / ".agent-os" / "cards.sqlite")
+            with self._patch_slug("my-repo", root):
+                resp = self.client.get("/my-repo/task_cards/abc12345")
+        body = resp.data.decode()
+        self.assertIn("/my-repo/task_cards", body)
+
+    # --- 404 cases ---
+
+    def test_unknown_card_id_returns_404(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = self._setup_db(tmpdir)
+            with self._patch_slug("my-repo", root):
+                resp = self.client.get("/my-repo/task_cards/does-not-exist")
+        self.assertEqual(resp.status_code, 404)
+
+    def test_missing_db_returns_404(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            with self._patch_slug("my-repo", root):
+                resp = self.client.get("/my-repo/task_cards/abc12345")
+        self.assertEqual(resp.status_code, 404)
+
+    def test_unknown_slug_returns_404(self):
+        with self._patch_slug("my-repo", None):
+            resp = self.client.get("/nonexistent/task_cards/abc12345")
+        self.assertEqual(resp.status_code, 404)
+
+    # --- XSS cases ---
+
+    def test_xss_in_title_is_escaped(self):
+        xss = "<script>alert('xss')</script>"
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = self._setup_db(tmpdir)
+            self._insert_card(root / ".agent-os" / "cards.sqlite", title=xss)
+            with self._patch_slug("my-repo", root):
+                resp = self.client.get("/my-repo/task_cards/abc12345")
+        body = resp.data.decode()
+        self.assertNotIn("<script>alert('xss')</script>", body)
+        self.assertIn("&lt;script&gt;", body)
+
+    def test_xss_in_description_is_escaped(self):
+        xss = "<b>not bold</b>"
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = self._setup_db(tmpdir)
+            self._insert_card(root / ".agent-os" / "cards.sqlite", description=xss)
+            with self._patch_slug("my-repo", root):
+                resp = self.client.get("/my-repo/task_cards/abc12345")
+        body = resp.data.decode()
+        self.assertNotIn("<b>not bold</b>", body)
+        self.assertIn("&lt;b&gt;", body)
+
+    def test_xss_in_comment_is_escaped(self):
+        xss = '<img src=x onerror="alert(1)">'
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = self._setup_db(tmpdir)
+            db_path = root / ".agent-os" / "cards.sqlite"
+            self._insert_card(db_path)
+            self._insert_comment(db_path, comment=xss)
+            with self._patch_slug("my-repo", root):
+                resp = self.client.get("/my-repo/task_cards/abc12345")
+        body = resp.data.decode()
+        self.assertNotIn('<img src=x onerror="alert(1)">', body)
+        self.assertIn("&lt;img", body)
+
+    def test_xss_in_author_is_escaped(self):
+        xss_author = "<script>bad</script>"
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = self._setup_db(tmpdir)
+            db_path = root / ".agent-os" / "cards.sqlite"
+            self._insert_card(db_path)
+            self._insert_comment(db_path, author=xss_author)
+            with self._patch_slug("my-repo", root):
+                resp = self.client.get("/my-repo/task_cards/abc12345")
+        body = resp.data.decode()
+        self.assertNotIn("<script>bad</script>", body)
+        self.assertIn("&lt;script&gt;", body)
+
+
 if __name__ == "__main__":
     unittest.main()
