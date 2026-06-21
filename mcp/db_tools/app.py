@@ -92,7 +92,27 @@ _PAGE_CSS = """
   .badge { display:inline-block; padding:2px 10px; border-radius:999px; font-size:0.78rem; font-weight:600; }
   .count { color:var(--muted); font-size:0.85rem; margin-top:16px; }
   .empty { text-align:center; padding:28px; color:var(--muted); }
+  tbody tr.clickable { cursor:pointer; }
+  .detail-meta { display:flex; gap:18px; flex-wrap:wrap; margin:18px 0 28px; font-size:0.88rem; color:var(--muted); }
+  .detail-meta strong { color:var(--text); }
+  .detail-section { margin-top:28px; }
+  .detail-section h2 { color:var(--muted); font-size:0.72rem; font-weight:600; letter-spacing:0.08em; text-transform:uppercase; margin:0 0 10px; }
+  .detail-desc { white-space:pre-wrap; word-break:break-word; background:var(--surface); border:1px solid var(--border); border-radius:8px; padding:16px 18px; font-size:0.9rem; line-height:1.6; }
+  .detail-desc.empty { color:var(--muted); font-style:italic; }
+  .comment-list { list-style:none; padding:0; margin:0; }
+  .comment-list li { border:1px solid var(--border); border-radius:8px; padding:14px 16px; margin-bottom:10px; background:var(--surface); }
+  .comment-meta { font-size:0.78rem; color:var(--muted); margin-bottom:6px; }
+  .comment-meta strong { color:var(--accent); }
+  .comment-body { white-space:pre-wrap; word-break:break-word; font-size:0.88rem; line-height:1.6; }
 """
+
+
+# (text color, pill background) per card status; falls back to the Created style.
+_STATUS_STYLE: dict[str, tuple[str, str]] = {
+    "Created":     ("#8b949e", "rgba(139,148,158,0.15)"),
+    "In Progress": ("#58a6ff", "rgba(88,166,255,0.15)"),
+    "Complete":    ("#3fb950", "rgba(63,185,80,0.15)"),
+}
 
 
 def _page(title: str, body: str, status: int = 200) -> Response:
@@ -281,22 +301,22 @@ def task_cards(slug: str):
 
     slug_h = escape(slug)
     slug_u = urllib.parse.quote(slug, safe="")
-    # (text color, pill background) per status; falls back to muted.
-    _status_style = {
-        "Created": ("#8b949e", "rgba(139,148,158,0.15)"),
-        "In Progress": ("#58a6ff", "rgba(88,166,255,0.15)"),
-        "Complete": ("#3fb950", "rgba(63,185,80,0.15)"),
-    }
     if not cards:
         rows = "<tr><td colspan='5' class='empty'>No cards yet</td></tr>"
     else:
         rows = ""
         for c in cards:
-            fg, bg = _status_style.get(c["status"], ("#8b949e", "rgba(139,148,158,0.15)"))
+            fg, bg = _STATUS_STYLE.get(c["status"], ("#8b949e", "rgba(139,148,158,0.15)"))
+            card_id_u = urllib.parse.quote(c["card_id"], safe="")
+            detail_url = f"/{slug_u}/task_cards/{card_id_u}"
+            # detail_url is fully percent-encoded (quote safe=""), so it cannot
+            # contain a quote or angle bracket — safe inside the single-quoted JS
+            # string within the double-quoted onclick attribute. Keep that quote
+            # nesting (attr=double, JS=single) if editing this line.
             rows += (
-                f"<tr>"
+                f"<tr class='clickable' onclick=\"location.href='{detail_url}'\">"
                 f"<td><code>{escape(c['card_id'])[:8]}</code></td>"
-                f"<td>{escape(c['title'])}</td>"
+                f"<td><a href='{detail_url}'>{escape(c['title'])}</a></td>"
                 f"<td><span class='badge' style='color:{fg};background:{bg}'>{escape(c['status'])}</span></td>"
                 f"<td>{escape(c['priority'] or '')}</td>"
                 f"<td class='sub'>{escape(c['updated_at'] or '')[:16]}</td>"
@@ -313,6 +333,95 @@ def task_cards(slug: str):
   </table>
   <p class="count">{len(cards)} card(s)</p>"""
     return _page(f"{slug_h} — Task Cards", body)
+
+
+@app.get("/<slug>/task_cards/<card_id>")
+def task_card_detail(slug: str, card_id: str):
+    repo_root, _, _ = _paths(slug)
+    if repo_root is None:
+        return _slug_not_found(slug)
+
+    db_path = repo_root / ".agent-os" / "cards.sqlite"
+    if not db_path.exists():
+        return _missing_file(slug, "No task-cards database found in this repository")
+
+    conn = None
+    try:
+        conn = sqlite3.connect(str(db_path))
+        conn.row_factory = sqlite3.Row
+        card = conn.execute(
+            "SELECT card_id, title, description, status, priority, created_at, updated_at"
+            " FROM cards WHERE card_id = ?",
+            (card_id,),
+        ).fetchone()
+        if card is None:
+            return _missing_file(slug, "Card not found")
+        comments = conn.execute(
+            "SELECT author, comment, created_at FROM card_comments"
+            " WHERE card_id = ? ORDER BY created_at ASC, comment_id ASC",
+            (card_id,),
+        ).fetchall()
+    except Exception:
+        print(f"task_card_detail: error reading card {card_id!r}", file=sys.stderr)
+        return _page(
+            "Error — Task Card",
+            "<h1>Error reading card</h1>"
+            "<p class=\"lead\">Could not read the task-cards database.</p>",
+            status=500,
+        )
+    finally:
+        if conn is not None:
+            conn.close()
+
+    slug_h = escape(slug)
+    slug_u = urllib.parse.quote(slug, safe="")
+    fg, bg = _STATUS_STYLE.get(card["status"], ("#8b949e", "rgba(139,148,158,0.15)"))
+
+    # Description block — preserve whitespace; show placeholder when empty.
+    raw_desc = card["description"] or ""
+    if raw_desc.strip():
+        desc_html = f"<pre class='detail-desc'>{escape(raw_desc)}</pre>"
+    else:
+        desc_html = "<pre class='detail-desc empty'>No description</pre>"
+
+    # Work log — oldest to newest.
+    if comments:
+        items = ""
+        for cm in comments:
+            author_h = escape(cm["author"] or "unknown")
+            ts_h = escape(str(cm["created_at"] or "")[:19])
+            body_h = escape(cm["comment"] or "")
+            items += (
+                f"<li>"
+                f"<div class='comment-meta'><strong>{author_h}</strong> &mdash; {ts_h}</div>"
+                f"<div class='comment-body'>{body_h}</div>"
+                f"</li>"
+            )
+        log_html = f"<ul class='comment-list'>{items}</ul>"
+    else:
+        log_html = "<p class='sub'>No work log yet.</p>"
+
+    body = (
+        f"  <p class='crumb'><a href='/{slug_u}/task_cards'>← Task Cards — {slug_h}</a></p>\n"
+        f"  <h1>{escape(card['title'])}</h1>\n"
+        f"  <span class='badge' style='color:{fg};background:{bg}'>{escape(card['status'])}</span>\n"
+        f"  <div class='detail-meta'>\n"
+        f"    <span><strong>Priority</strong> {escape(card['priority'] or '—')}</span>\n"
+        f"    <span><strong>Created</strong> {escape(str(card['created_at'] or '')[:19])}</span>\n"
+        f"    <span><strong>Updated</strong> {escape(str(card['updated_at'] or '')[:19])}</span>\n"
+        f"    <span><strong>ID</strong> <code>{escape(card['card_id'])}</code></span>\n"
+        f"  </div>\n"
+        f"  <div class='detail-section'>\n"
+        f"    <h2>Description</h2>\n"
+        f"    {desc_html}\n"
+        f"  </div>\n"
+        f"  <div class='detail-section'>\n"
+        f"    <h2>Work Log</h2>\n"
+        f"    {log_html}\n"
+        f"  </div>\n"
+        f"  <hr><p class='foot'><a href='/{slug_u}/task_cards'>← Back to Task Cards</a></p>"
+    )
+    return _page(f"{escape(card['title'])} — Task Cards — {slug_h}", body)
 
 
 @app.get("/<slug>/api/code_graph")
