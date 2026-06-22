@@ -76,7 +76,9 @@ class TestLoadCodeGraphPresent(unittest.TestCase):
     """load_code_graph() loads and normalizes the fixture when the file exists."""
 
     def setUp(self):
-        self._tmpdir = tempfile.mkdtemp()
+        import shutil
+        self._tmpdir = tempfile.mkdtemp(prefix="agent_os_codegraph_")
+        self.addCleanup(shutil.rmtree, self._tmpdir, True)
         outdir = Path(self._tmpdir) / "graphify-out"
         outdir.mkdir()
         # Write the RAW (un-normalized) graphify-format fixture to disk so the
@@ -141,7 +143,9 @@ class TestGraphifyFormatNormalizationRegression(unittest.TestCase):
     }
 
     def setUp(self):
-        self._tmpdir = tempfile.mkdtemp()
+        import shutil
+        self._tmpdir = tempfile.mkdtemp(prefix="agent_os_codegraph_")
+        self.addCleanup(shutil.rmtree, self._tmpdir, True)
         outdir = Path(self._tmpdir) / "graphify-out"
         outdir.mkdir()
         (outdir / "graph.json").write_text(json.dumps(self.RAW_GRAPHIFY_GRAPH))
