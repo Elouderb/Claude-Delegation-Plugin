@@ -28,6 +28,41 @@ def _graph_port() -> int:
     return int(os.getenv("AGENT_OS_GRAPH_PORT") or "5000")
 
 
+def _graph_log_path(port: int) -> Path:
+    """Path of the log file the spawned graph server's stdout+stderr is redirected to.
+
+    Lives under the same ``~/.agent-os/`` directory as the repo registry and is
+    suffixed with the port so a custom AGENT_OS_GRAPH_PORT instance cannot clobber
+    the default :5000 instance's log. Pure path builder — the spawn path is
+    responsible for ensuring the parent directory exists (this is called from the
+    read path too, which must not mutate the filesystem).
+    """
+    return Path.home() / ".agent-os" / f"graph_server-{port}.log"
+
+
+def _read_log_tail(port: int, max_bytes: int = 2000) -> str:
+    """Return the last ``max_bytes`` of the graph server's log file as text.
+
+    Used for post-exit crash diagnostics in place of ``communicate()`` now that
+    the child's output goes to a file instead of a PIPE. Performs a bounded read
+    (seek to the tail) so a large log is never loaded whole, and returns "" on any
+    error (missing file, decode failure, etc.) so callers can log unconditionally.
+    ``max_bytes`` is the single cap on how much tail is surfaced — callers log the
+    result as-is rather than re-truncating.
+    """
+    try:
+        log_path = _graph_log_path(port)
+        with open(log_path, "rb") as fh:
+            try:
+                fh.seek(-max_bytes, os.SEEK_END)
+            except OSError:
+                # File shorter than max_bytes: read from the start.
+                fh.seek(0)
+            return fh.read().decode("utf-8", errors="replace")
+    except Exception:
+        return ""
+
+
 def _register_repo(repo_root: Path) -> str:
     """Write repo_root into the shared registry and return its URL slug.
 
@@ -137,7 +172,7 @@ def _make_pdeathsig_preexec(parent_pid: int):
     return _preexec
 
 
-def _spawn_graph_server(app_path: Path, repo_root: Path, port: int) -> "subprocess.Popen[str]":
+def _spawn_graph_server(app_path: Path, repo_root: Path, port: int) -> "subprocess.Popen[bytes]":
     """Launch the Flask graph server subprocess and return the Popen handle.
 
     On Linux the child is coupled to this process via PR_SET_PDEATHSIG so the
@@ -155,17 +190,42 @@ def _spawn_graph_server(app_path: Path, repo_root: Path, port: int) -> "subproce
     on_main_thread = threading.current_thread() is threading.main_thread()
     use_pdeathsig = sys.platform == "linux" and on_main_thread
     preexec = _make_pdeathsig_preexec(parent_pid) if use_pdeathsig else None
-    proc = subprocess.Popen(
-        [sys.executable, str(app_path)],
-        cwd=repo_root,
-        stdout=subprocess.PIPE,
-        stderr=subprocess.PIPE,
-        text=True,
-        bufsize=1,
-        env={**os.environ, "PORT": str(port)},
-        preexec_fn=preexec,
-    )
-    log(f"Graph server started (PID: {proc.pid}) at {app_path}")
+    # Redirect the child's stdout+stderr to a file (truncated per spawn) instead
+    # of a PIPE. The Werkzeug dev server logs every request to stderr; nobody
+    # drains the pipe while the child is alive, so a PIPE fills its ~64KB kernel
+    # buffer after sustained traffic and the child blocks mid-session. File writes
+    # never block. Crash diagnostics are preserved by reading the tail of this log
+    # post-exit (see _read_log_tail) instead of communicate().
+    #
+    # If the log file can't be opened (read-only home, full disk, ...), fall back
+    # to DEVNULL so the graph server still STARTS — losing diagnostics is
+    # acceptable, a silent no-start (which the old PIPE path never risked) is not.
+    # Either way the child's output never goes to a PIPE, so it can't block.
+    log_path = _graph_log_path(port)
+    log_file = None
+    try:
+        log_path.parent.mkdir(parents=True, exist_ok=True)
+        log_file = open(log_path, "w")
+    except OSError as exc:
+        log(f"WARNING: could not open graph server log {log_path} ({exc}); "
+            f"discarding child output.")
+    out = log_file if log_file is not None else subprocess.DEVNULL
+    try:
+        proc = subprocess.Popen(
+            [sys.executable, str(app_path)],
+            cwd=repo_root,
+            stdout=out,
+            stderr=subprocess.STDOUT,
+            env={**os.environ, "PORT": str(port)},
+            preexec_fn=preexec,
+        )
+    finally:
+        # Popen dup2's the fd into the child; the parent no longer needs its own
+        # handle. Close it whether or not Popen succeeded.
+        if log_file is not None:
+            log_file.close()
+    dest = log_path if log_file is not None else "DEVNULL"
+    log(f"Graph server started (PID: {proc.pid}) at {app_path}; output -> {dest}")
     return proc
 
 
@@ -200,20 +260,18 @@ def start_graph_server():
 
         # --- Respawn check (AC #2 + #3) -----------------------------------
         # If we own a child process and it has already exited, surface its
-        # stderr and clear the handle so we fall through to spawn a new one.
-        # poll() once. A non-None code means the child has already terminated,
-        # so its pipe buffers are bounded and communicate() reaches EOF without
-        # a timeout — no risk of blocking on a full pipe.
+        # output and clear the handle so we fall through to spawn a new one.
+        # The child's stdout+stderr were redirected to a log file at spawn time,
+        # so we read a bounded tail of that file for diagnostics rather than
+        # draining a PIPE (see _read_log_tail).
         exit_code = flask_process.poll() if flask_process is not None else None
         if flask_process is not None and exit_code is not None:
             log(f"WARNING: Previously-spawned graph server (PID {flask_process.pid}) "
                 f"exited with code {exit_code}; will respawn.")
             try:
-                _stdout, _stderr = flask_process.communicate()
-                if _stderr:
-                    log(f"Graph server stderr before exit: {_stderr[:500]}")
-                if _stdout:
-                    log(f"Graph server stdout before exit: {_stdout[:200]}")
+                tail = _read_log_tail(port)
+                if tail:
+                    log(f"Graph server output before exit:\n{tail}")
             except Exception:
                 pass
             flask_process = None
@@ -258,15 +316,15 @@ def _check_graph_server_health():
     global flask_process
     exit_code = flask_process.poll() if flask_process else None
     if flask_process and exit_code is not None:
-        # Process has exited — surface its output first. The child is already
-        # dead, so communicate() drains the bounded pipe buffers and returns at
-        # EOF without needing a timeout.
+        # Process has exited — surface its output first. The child's stdout+stderr
+        # were redirected to a log file at spawn time, so we read a bounded tail of
+        # that file for diagnostics rather than draining a PIPE (see _read_log_tail).
         try:
-            stdout, stderr = flask_process.communicate()
-            if stderr:
-                log(f"WARNING: Graph server crashed (exit {exit_code}). stderr: {stderr[:500]}")
-            if stdout:
-                log(f"Graph server output: {stdout[:200]}")
+            tail = _read_log_tail(_graph_port())
+            if tail:
+                log(f"WARNING: Graph server crashed (exit {exit_code}). Recent output:\n{tail}")
+            else:
+                log(f"WARNING: Graph server crashed (exit {exit_code}).")
         except Exception:
             pass
         flask_process = None
