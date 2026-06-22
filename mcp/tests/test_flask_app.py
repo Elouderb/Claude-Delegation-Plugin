@@ -587,5 +587,301 @@ class TestTaskCardDetailRoute(_AppTestCase):
         self.assertIn("&lt;script&gt;", body)
 
 
+class TestAllCardsRoutes(_AppTestCase):
+    """Tests for GET /all_cards and GET /all_cards.json."""
+
+    # ------------------------------------------------------------------ helpers
+
+    def _make_repo(self, tmpdir: str) -> Path:
+        """Create a cards.sqlite in tmpdir/.agent-os/ with the standard schema."""
+        root = Path(tmpdir)
+        agent_os = root / ".agent-os"
+        agent_os.mkdir(parents=True, exist_ok=True)
+        db_path = agent_os / "cards.sqlite"
+        conn = sqlite3.connect(str(db_path))
+        conn.execute("""
+            CREATE TABLE cards (
+                card_id TEXT PRIMARY KEY,
+                title TEXT NOT NULL,
+                description TEXT,
+                status TEXT NOT NULL,
+                priority TEXT,
+                created_at TIMESTAMP,
+                updated_at TIMESTAMP
+            )
+        """)
+        conn.commit()
+        conn.close()
+        return root
+
+    def _insert_card(self, root: Path, card_id: str, title: str,
+                     status: str = "Created", priority: str = "medium",
+                     updated_at: str = "2026-01-02T00:00:00"):
+        db_path = root / ".agent-os" / "cards.sqlite"
+        conn = sqlite3.connect(str(db_path))
+        conn.execute(
+            "INSERT INTO cards VALUES (?,?,?,?,?,?,?)",
+            (card_id, title, None, status, priority,
+             "2026-01-01T00:00:00", updated_at),
+        )
+        conn.commit()
+        conn.close()
+
+    def _registry_from_roots(self, slugs_roots: dict) -> dict:
+        """Build a registry dict mapping slug -> str(root)."""
+        return {slug: str(root) for slug, root in slugs_roots.items()}
+
+    # ── /all_cards HTML endpoint ───────────────────────────────────────────────
+
+    def test_all_cards_empty_registry_returns_200(self):
+        with self._patch_registry({}):
+            resp = self.client.get("/all_cards")
+        self.assertEqual(resp.status_code, 200)
+
+    def test_all_cards_empty_registry_shows_no_repos_message(self):
+        with self._patch_registry({}):
+            resp = self.client.get("/all_cards")
+        self.assertIn("No repositories registered", resp.data.decode())
+
+    def test_all_cards_shows_project_slug(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = self._make_repo(tmpdir)
+            registry = self._registry_from_roots({"my-repo": root})
+            with self._patch_registry(registry):
+                resp = self.client.get("/all_cards")
+        self.assertEqual(resp.status_code, 200)
+        self.assertIn("my-repo", resp.data.decode())
+
+    def test_all_cards_shows_three_status_columns(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = self._make_repo(tmpdir)
+            registry = self._registry_from_roots({"my-repo": root})
+            with self._patch_registry(registry):
+                resp = self.client.get("/all_cards")
+        body = resp.data.decode()
+        self.assertIn("Created", body)
+        self.assertIn("In Progress", body)
+        self.assertIn("Complete", body)
+
+    def test_all_cards_card_appears_in_correct_column(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = self._make_repo(tmpdir)
+            self._insert_card(root, "card0001", "My Created Card", status="Created")
+            self._insert_card(root, "card0002", "My InProgress Card", status="In Progress")
+            self._insert_card(root, "card0003", "My Complete Card", status="Complete")
+            registry = self._registry_from_roots({"repo-a": root})
+            with self._patch_registry(registry):
+                resp = self.client.get("/all_cards")
+        body = resp.data.decode()
+        self.assertIn("My Created Card", body)
+        self.assertIn("My InProgress Card", body)
+        self.assertIn("My Complete Card", body)
+
+    def test_all_cards_missing_db_shows_empty_not_500(self):
+        """A repo without cards.sqlite should show empty columns, not 500."""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)  # no .agent-os/cards.sqlite
+            registry = self._registry_from_roots({"no-db-repo": root})
+            with self._patch_registry(registry):
+                resp = self.client.get("/all_cards")
+        self.assertEqual(resp.status_code, 200)
+        self.assertIn("no-db-repo", resp.data.decode())
+
+    def test_all_cards_multi_repo_aggregation(self):
+        with tempfile.TemporaryDirectory() as td1, \
+             tempfile.TemporaryDirectory() as td2:
+            root_a = self._make_repo(td1)
+            root_b = self._make_repo(td2)
+            self._insert_card(root_a, "aaa00001", "Alpha Card")
+            self._insert_card(root_b, "bbb00001", "Beta Card")
+            registry = self._registry_from_roots({"alpha": root_a, "beta": root_b})
+            with self._patch_registry(registry):
+                resp = self.client.get("/all_cards")
+        body = resp.data.decode()
+        self.assertIn("Alpha Card", body)
+        self.assertIn("Beta Card", body)
+
+    def test_all_cards_xss_title_escaped_in_html(self):
+        """A card title with <script> must appear escaped, not injected."""
+        xss = "<script>alert('xss')</script>"
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = self._make_repo(tmpdir)
+            self._insert_card(root, "xss00001", xss)
+            registry = self._registry_from_roots({"xss-repo": root})
+            with self._patch_registry(registry):
+                resp = self.client.get("/all_cards")
+        body = resp.data.decode()
+        self.assertNotIn("<script>alert('xss')</script>", body)
+        self.assertIn("&lt;script&gt;", body)
+
+    def test_all_cards_link_from_index(self):
+        """Index page must contain a link to /all_cards."""
+        with self._patch_registry({}):
+            resp = self.client.get("/")
+        self.assertIn("/all_cards", resp.data.decode())
+
+    # ── /all_cards.json endpoint ───────────────────────────────────────────────
+
+    def test_all_cards_json_returns_200(self):
+        with self._patch_registry({}):
+            resp = self.client.get("/all_cards.json")
+        self.assertEqual(resp.status_code, 200)
+
+    def test_all_cards_json_empty_registry(self):
+        with self._patch_registry({}):
+            resp = self.client.get("/all_cards.json")
+        data = json.loads(resp.data)
+        self.assertEqual(data["projects"], [])
+
+    def test_all_cards_json_shape(self):
+        """JSON must have projects[] with slug, counts, columns keys."""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = self._make_repo(tmpdir)
+            self._insert_card(root, "c0000001", "A Card", status="Created")
+            registry = self._registry_from_roots({"my-repo": root})
+            with self._patch_registry(registry):
+                resp = self.client.get("/all_cards.json")
+        data = json.loads(resp.data)
+        self.assertIn("projects", data)
+        proj = data["projects"][0]
+        self.assertEqual(proj["slug"], "my-repo")
+        self.assertIn("counts", proj)
+        self.assertIn("columns", proj)
+        self.assertIn("Created", proj["columns"])
+        self.assertIn("In Progress", proj["columns"])
+        self.assertIn("Complete", proj["columns"])
+
+    def test_all_cards_json_status_grouping(self):
+        """Cards must appear in the correct status column in the JSON."""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = self._make_repo(tmpdir)
+            self._insert_card(root, "c0000001", "Created Card", status="Created")
+            self._insert_card(root, "c0000002", "InProg Card", status="In Progress")
+            self._insert_card(root, "c0000003", "Done Card", status="Complete")
+            registry = self._registry_from_roots({"repo": root})
+            with self._patch_registry(registry):
+                resp = self.client.get("/all_cards.json")
+        data = json.loads(resp.data)
+        proj = data["projects"][0]
+        self.assertEqual(len(proj["columns"]["Created"]), 1)
+        self.assertEqual(proj["columns"]["Created"][0]["title"], "Created Card")
+        self.assertEqual(len(proj["columns"]["In Progress"]), 1)
+        self.assertEqual(len(proj["columns"]["Complete"]), 1)
+        self.assertEqual(proj["counts"]["Created"], 1)
+        self.assertEqual(proj["counts"]["In Progress"], 1)
+        self.assertEqual(proj["counts"]["Complete"], 1)
+
+    def test_all_cards_json_noncanonical_status_in_other(self):
+        """Cards with non-canonical status must appear in the Other bucket."""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = self._make_repo(tmpdir)
+            self._insert_card(root, "c0000001", "Weird Card", status="Weird")
+            registry = self._registry_from_roots({"repo": root})
+            with self._patch_registry(registry):
+                resp = self.client.get("/all_cards.json")
+        data = json.loads(resp.data)
+        proj = data["projects"][0]
+        self.assertEqual(proj["counts"]["Other"], 1)
+        self.assertEqual(proj["columns"]["Other"][0]["title"], "Weird Card")
+
+    def test_all_cards_json_missing_db_empty_columns(self):
+        """A repo without cards.sqlite must return empty columns, no error."""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            registry = self._registry_from_roots({"no-db": root})
+            with self._patch_registry(registry):
+                resp = self.client.get("/all_cards.json")
+        data = json.loads(resp.data)
+        proj = data["projects"][0]
+        self.assertIsNone(proj["error"])
+        self.assertEqual(proj["columns"]["Created"], [])
+
+    def test_all_cards_json_multi_repo_sorted_by_slug(self):
+        with tempfile.TemporaryDirectory() as td1, \
+             tempfile.TemporaryDirectory() as td2:
+            root_a = self._make_repo(td1)
+            root_b = self._make_repo(td2)
+            registry = self._registry_from_roots({"zzz": root_a, "aaa": root_b})
+            with self._patch_registry(registry):
+                resp = self.client.get("/all_cards.json")
+        data = json.loads(resp.data)
+        slugs = [p["slug"] for p in data["projects"]]
+        self.assertEqual(slugs, sorted(slugs))
+
+    def test_all_cards_json_card_fields(self):
+        """Each card entry must have card_id, title, priority."""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = self._make_repo(tmpdir)
+            self._insert_card(root, "mycard01", "My Card", priority="high")
+            registry = self._registry_from_roots({"repo": root})
+            with self._patch_registry(registry):
+                resp = self.client.get("/all_cards.json")
+        data = json.loads(resp.data)
+        card = data["projects"][0]["columns"]["Created"][0]
+        self.assertEqual(card["card_id"], "mycard01")
+        self.assertEqual(card["title"], "My Card")
+        self.assertEqual(card["priority"], "high")
+
+    def test_all_cards_json_xss_title_raw_in_json(self):
+        """JSON carries the raw title; client JS must use textContent (not innerHTML)."""
+        xss = "<script>alert('xss')</script>"
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = self._make_repo(tmpdir)
+            self._insert_card(root, "xss00001", xss)
+            registry = self._registry_from_roots({"repo": root})
+            with self._patch_registry(registry):
+                resp = self.client.get("/all_cards.json")
+        data = json.loads(resp.data)
+        title = data["projects"][0]["columns"]["Created"][0]["title"]
+        self.assertEqual(title, xss)
+
+    # ── corrupt-DB resilience + Other-bucket count ─────────────────────────────
+
+    def _make_corrupt_repo(self, tmpdir: str) -> Path:
+        """Create a cards.sqlite that exists but is not a valid SQLite database."""
+        root = Path(tmpdir)
+        agent_os = root / ".agent-os"
+        agent_os.mkdir(parents=True, exist_ok=True)
+        (agent_os / "cards.sqlite").write_bytes(b"this is not a sqlite database")
+        return root
+
+    def test_all_cards_corrupt_db_does_not_500(self):
+        """A corrupt cards.sqlite must not 500 the whole board."""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = self._make_corrupt_repo(tmpdir)
+            registry = self._registry_from_roots({"corrupt-repo": root})
+            with self._patch_registry(registry):
+                resp = self.client.get("/all_cards")
+        self.assertEqual(resp.status_code, 200)
+        self.assertIn("corrupt-repo", resp.data.decode())
+
+    def test_all_cards_json_corrupt_db_sets_error_and_empty_columns(self):
+        """A corrupt cards.sqlite exercises the except branch: error set, columns empty."""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = self._make_corrupt_repo(tmpdir)
+            registry = self._registry_from_roots({"corrupt-repo": root})
+            with self._patch_registry(registry):
+                resp = self.client.get("/all_cards.json")
+        self.assertEqual(resp.status_code, 200)
+        proj = json.loads(resp.data)["projects"][0]
+        self.assertIsNotNone(proj["error"])
+        self.assertEqual(proj["columns"]["Created"], [])
+        self.assertEqual(proj["columns"]["In Progress"], [])
+        self.assertEqual(proj["columns"]["Complete"], [])
+
+    def test_all_cards_count_excludes_other_and_shows_badge(self):
+        """Non-canonical cards must not inflate the count; they get an 'other' badge."""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = self._make_repo(tmpdir)
+            self._insert_card(root, "c0000001", "Canon", status="Created")
+            self._insert_card(root, "c0000002", "Weird", status="Archived")
+            registry = self._registry_from_roots({"repo": root})
+            with self._patch_registry(registry):
+                resp = self.client.get("/all_cards")
+        body = resp.data.decode()
+        self.assertIn("1 card</div>", body)   # count excludes the Other-status card
+        self.assertIn("+1 other", body)       # but the off-status card is surfaced
+
+
 if __name__ == "__main__":
     unittest.main()

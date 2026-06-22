@@ -104,6 +104,39 @@ _PAGE_CSS = """
   .comment-meta { font-size:0.78rem; color:var(--muted); margin-bottom:6px; }
   .comment-meta strong { color:var(--accent); }
   .comment-body { white-space:pre-wrap; word-break:break-word; font-size:0.88rem; line-height:1.6; }
+  /* ── All-cards board ─────────────────────────────────────────── */
+  .board-header { display:flex; align-items:baseline; gap:16px; flex-wrap:wrap; margin-bottom:28px; }
+  .board-header h1 { margin:0; }
+  .board-live { font-size:0.78rem; color:var(--muted); }
+  .board-live .dot { display:inline-block; width:7px; height:7px; border-radius:50%; background:var(--accent); margin-right:5px; animation:blink 2s step-end infinite; }
+  @keyframes blink { 0%,100%{opacity:1} 50%{opacity:0.25} }
+  .board-paused .dot { background:var(--muted); animation:none; }
+  .board-wrap { overflow-x:auto; }
+  .board { display:grid; grid-template-columns:160px repeat(3,minmax(200px,1fr)); gap:0; margin-top:0; min-width:760px; }
+  .board-row { display:contents; }
+  .board-cell {
+    padding:12px 14px; border-bottom:1px solid var(--border);
+  }
+  .board-cell:first-child { border-right:1px solid var(--border); }
+  .board-head { padding:10px 14px; border-bottom:2px solid var(--border); }
+  .board-head:first-child { border-right:1px solid var(--border); }
+  .board-head.col-label { font-size:0.72rem; font-weight:600; letter-spacing:0.08em; text-transform:uppercase; color:var(--muted); }
+  .board-slug { font-size:0.88rem; font-weight:500; color:var(--heading); word-break:break-all; }
+  .board-slug a { color:var(--heading); }
+  .board-count { font-size:0.72rem; color:var(--muted); margin-top:2px; }
+  .board-other { font-size:0.68rem; color:#d29922; margin-top:2px; }
+  .chip-list { list-style:none; padding:0; margin:0; display:flex; flex-direction:column; gap:5px; }
+  .chip {
+    display:block; padding:5px 9px; border-radius:6px;
+    background:var(--surface); border:1px solid var(--border);
+    font-size:0.78rem; line-height:1.4; color:var(--text);
+    text-decoration:none;
+  }
+  .chip:hover { border-color:var(--accent); color:var(--heading); text-decoration:none; }
+  .chip-title { display:block; font-weight:500; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
+  .chip-meta { font-size:0.7rem; color:var(--muted); margin-top:1px; }
+  .board-empty { font-size:0.78rem; color:var(--muted); font-style:italic; }
+  .board-error { font-size:0.78rem; color:#e3463a; }
 """
 
 
@@ -186,6 +219,344 @@ def _missing_file(slug: str, msg: str) -> Response:
     )
 
 
+_CANONICAL_STATUSES = ("Created", "In Progress", "Complete")
+
+
+def _load_all_cards_data() -> list[dict]:
+    """Return per-project card data from every registered repo.
+
+    Shape: [{"slug": str, "counts": {status: int}, "columns": {status: [card, ...]},
+             "error": str|None}, ...]
+
+    Each card dict: {"card_id": str, "title": str, "priority": str|None}.
+    Projects are sorted by slug. Missing or unreadable cards.sqlite yields
+    empty columns (never raises). Non-canonical statuses appear under "Other".
+    """
+    registry = _load_registry()
+    projects = []
+    for slug in sorted(registry.keys()):
+        root_str = registry[slug]
+        db_path = Path(root_str) / ".agent-os" / "cards.sqlite"
+
+        columns: dict[str, list[dict]] = {s: [] for s in _CANONICAL_STATUSES}
+        columns["Other"] = []
+        counts: dict[str, int] = {s: 0 for s in _CANONICAL_STATUSES}
+        counts["Other"] = 0
+        error: str | None = None
+
+        if not db_path.exists():
+            # Missing DB is not an error — just empty columns.
+            pass
+        else:
+            conn = None
+            try:
+                conn = sqlite3.connect(str(db_path))
+                conn.row_factory = sqlite3.Row
+                rows = conn.execute(
+                    "SELECT card_id, title, status, priority"
+                    " FROM cards ORDER BY updated_at DESC, created_at DESC"
+                ).fetchall()
+                for row in rows:
+                    status = row["status"]
+                    card = {
+                        "card_id": row["card_id"],
+                        "title": row["title"],
+                        "priority": row["priority"],
+                    }
+                    if status in _CANONICAL_STATUSES:
+                        columns[status].append(card)
+                        counts[status] += 1
+                    else:
+                        columns["Other"].append(card)
+                        counts["Other"] += 1
+            except Exception:
+                print(f"_load_all_cards_data: error reading {db_path}", file=sys.stderr)
+                error = "Could not read cards database"
+                # Reset columns/counts to empty on error
+                columns = {s: [] for s in _CANONICAL_STATUSES}
+                columns["Other"] = []
+                counts = {s: 0 for s in _CANONICAL_STATUSES}
+                counts["Other"] = 0
+            finally:
+                if conn is not None:
+                    conn.close()
+
+        projects.append({
+            "slug": slug,
+            "counts": counts,
+            "columns": columns,
+            "error": error,
+        })
+    return projects
+
+
+@app.get("/all_cards")
+def all_cards():
+    projects = _load_all_cards_data()
+
+    col_headers = "".join(
+        f'<div class="board-head col-label">{escape(s)}</div>'
+        for s in _CANONICAL_STATUSES
+    )
+    header_row = (
+        '<div class="board-head" style="color:var(--muted);font-size:0.72rem;">'
+        "Project</div>" + col_headers
+    )
+
+    rows_html = ""
+    for proj in projects:
+        slug = proj["slug"]
+        slug_h = escape(slug)
+        slug_u = urllib.parse.quote(slug, safe="")
+        err = proj["error"]
+
+        # Left cell — slug name + total count. Count only canonical-status cards
+        # so the number matches the chips rendered in the 3 columns; any
+        # non-canonical ("Other") cards are surfaced via a separate small badge
+        # rather than silently inflating the count.
+        total = sum(proj["counts"][s] for s in _CANONICAL_STATUSES)
+        other_n = proj["counts"]["Other"]
+        other_badge = f'<div class="board-other">+{other_n} other</div>' if other_n else ""
+        slug_cell = (
+            f'<div class="board-cell">'
+            f'<div class="board-slug"><a href="/{slug_u}/task_cards">{slug_h}</a></div>'
+            f'<div class="board-count">{total} card{"s" if total != 1 else ""}</div>'
+            f'{other_badge}'
+            f"</div>"
+        )
+
+        # Column cells
+        col_cells = ""
+        for status in _CANONICAL_STATUSES:
+            if err:
+                col_cells += f'<div class="board-cell"><span class="board-error">{escape(err)}</span></div>'
+            else:
+                cards_in_col = proj["columns"][status]
+                if not cards_in_col:
+                    col_cells += '<div class="board-cell"><span class="board-empty">—</span></div>'
+                else:
+                    chips = ""
+                    for card in cards_in_col:
+                        card_id_u = urllib.parse.quote(card["card_id"], safe="")
+                        detail_url = f"/{slug_u}/task_cards/{card_id_u}"
+                        priority_h = escape(card["priority"] or "")
+                        title_h = escape(card["title"])
+                        chips += (
+                            f'<a class="chip" href="{detail_url}">'
+                            f'<span class="chip-title">{title_h}</span>'
+                            f'<span class="chip-meta">{priority_h}</span>'
+                            f"</a>"
+                        )
+                    col_cells += f'<div class="board-cell"><div class="chip-list">{chips}</div></div>'
+
+        # data-slug must match the JSON `proj.slug` so the live-poll JS reconciles
+        # these server-rendered rows in place (otherwise the first poll can't match
+        # them and duplicates every row).
+        rows_html += f'<div class="board-row" data-slug="{slug_h}">{slug_cell}{col_cells}</div>'
+
+    if not projects:
+        board_html = (
+            '<div class="board-head" style="color:var(--muted)">No repositories registered</div>'
+        )
+    else:
+        board_html = (
+            f'<div class="board-wrap">'
+            f'<div class="board" id="board-grid">{header_row}{rows_html}</div>'
+            f'</div>'
+        )
+
+    # Client-side live polling script — all card data is fetched as JSON and
+    # rendered via DOM APIs only (no innerHTML with data) to prevent XSS.
+    # NOTE: renderBoard() below must mirror the server-rendered board structure
+    # above (cell order, classes, the count + "+N other" badge, card/cards
+    # pluralization) — the first poll replaces the server DOM with the JS DOM, so
+    # any structural change must be made in BOTH places to avoid a visible reshape.
+    poll_js = """
+<script>
+(function () {
+  var INTERVAL = 4000;
+  var timer = null;
+  var paused = false;
+  var liveEl = document.getElementById('board-live-status');
+
+  function setPaused(v) {
+    paused = v;
+    if (liveEl) {
+      liveEl.className = v ? 'board-paused' : '';
+      liveEl.querySelector('.label').textContent = v ? 'paused' : 'live';
+    }
+  }
+
+  function buildChip(card, detailUrl) {
+    var a = document.createElement('a');
+    a.className = 'chip';
+    a.href = detailUrl;
+    var span1 = document.createElement('span');
+    span1.className = 'chip-title';
+    span1.textContent = card.title;
+    var span2 = document.createElement('span');
+    span2.className = 'chip-meta';
+    span2.textContent = card.priority || '';
+    a.appendChild(span1);
+    a.appendChild(span2);
+    return a;
+  }
+
+  function renderBoard(data) {
+    var grid = document.getElementById('board-grid');
+    if (!grid) return;
+    var projects = data.projects || [];
+    var statuses = ['Created', 'In Progress', 'Complete'];
+
+    // Build a map of existing rows by slug for efficient update
+    var existingRows = {};
+    var rowEls = grid.querySelectorAll('.board-row');
+    rowEls.forEach(function (r) { existingRows[r.dataset.slug] = r; });
+
+    // Track which slugs are in new data
+    var newSlugs = {};
+    projects.forEach(function (proj) { newSlugs[proj.slug] = true; });
+
+    // Remove stale rows
+    Object.keys(existingRows).forEach(function (s) {
+      if (!newSlugs[s]) grid.removeChild(existingRows[s]);
+    });
+
+    projects.forEach(function (proj, idx) {
+      var row = existingRows[proj.slug];
+      var isNew = !row;
+      if (isNew) {
+        row = document.createElement('div');
+        row.className = 'board-row';
+        row.dataset.slug = proj.slug;
+      }
+
+      // Rebuild cells
+      while (row.firstChild) row.removeChild(row.firstChild);
+
+      // Slug cell
+      var slugCell = document.createElement('div');
+      slugCell.className = 'board-cell';
+      var slugDiv = document.createElement('div');
+      slugDiv.className = 'board-slug';
+      var slugLink = document.createElement('a');
+      slugLink.href = '/' + encodeURIComponent(proj.slug) + '/task_cards';
+      slugLink.textContent = proj.slug;
+      slugDiv.appendChild(slugLink);
+      slugCell.appendChild(slugDiv);
+      var total = 0;
+      statuses.forEach(function (s) { total += (proj.counts[s] || 0); });
+      var countDiv = document.createElement('div');
+      countDiv.className = 'board-count';
+      countDiv.textContent = total + (total === 1 ? ' card' : ' cards');
+      slugCell.appendChild(countDiv);
+      var otherN = (proj.counts && proj.counts['Other']) || 0;
+      if (otherN) {
+        var otherDiv = document.createElement('div');
+        otherDiv.className = 'board-other';
+        otherDiv.textContent = '+' + otherN + ' other';
+        slugCell.appendChild(otherDiv);
+      }
+      row.appendChild(slugCell);
+
+      // Status column cells
+      statuses.forEach(function (status) {
+        var cell = document.createElement('div');
+        cell.className = 'board-cell';
+        if (proj.error) {
+          var errSpan = document.createElement('span');
+          errSpan.className = 'board-error';
+          errSpan.textContent = proj.error;
+          cell.appendChild(errSpan);
+        } else {
+          var cards = (proj.columns && proj.columns[status]) || [];
+          if (cards.length === 0) {
+            var emptySpan = document.createElement('span');
+            emptySpan.className = 'board-empty';
+            emptySpan.textContent = '—';
+            cell.appendChild(emptySpan);
+          } else {
+            var chipList = document.createElement('div');
+            chipList.className = 'chip-list';
+            cards.forEach(function (card) {
+              var detailUrl = '/' + encodeURIComponent(proj.slug) +
+                              '/task_cards/' + encodeURIComponent(card.card_id);
+              chipList.appendChild(buildChip(card, detailUrl));
+            });
+            cell.appendChild(chipList);
+          }
+        }
+        row.appendChild(cell);
+      });
+
+      if (isNew) {
+        // Insert in order after any existing header divs and before later project rows
+        var allRows = grid.querySelectorAll('.board-row');
+        if (allRows.length === 0 || idx >= allRows.length) {
+          grid.appendChild(row);
+        } else {
+          grid.insertBefore(row, allRows[idx]);
+        }
+      }
+    });
+  }
+
+  function poll() {
+    if (paused) return;
+    fetch('/all_cards.json')
+      .then(function (r) { return r.json(); })
+      .then(renderBoard)
+      .catch(function () { /* ignore transient errors */ });
+  }
+
+  function startPolling() {
+    if (timer) clearInterval(timer);
+    timer = setInterval(poll, INTERVAL);
+  }
+
+  document.addEventListener('visibilitychange', function () {
+    if (document.hidden) {
+      setPaused(true);
+    } else {
+      setPaused(false);
+      poll();
+      startPolling();
+    }
+  });
+
+  startPolling();
+}());
+</script>
+"""
+
+    body = (
+        '<div class="board-header">'
+        '<h1>All Cards</h1>'
+        '<span class="board-live" id="board-live-status">'
+        '<span class="dot"></span><span class="label">live</span>'
+        '</span>'
+        "</div>"
+        f"{board_html}"
+        f"<hr><p class=\"foot\"><a href=\"/\">← All repositories</a></p>"
+        f"{poll_js}"
+    )
+    return _page("All Cards — Agent OS", body)
+
+
+@app.get("/all_cards.json")
+def all_cards_json():
+    projects = _load_all_cards_data()
+    out = []
+    for proj in projects:
+        out.append({
+            "slug": proj["slug"],
+            "counts": proj["counts"],
+            "columns": proj["columns"],
+            "error": proj["error"],
+        })
+    return jsonify({"projects": out})
+
+
 @app.get("/")
 def index():
     registry = _load_registry()
@@ -207,7 +578,14 @@ def index():
             f"<ul class=\"repos\">{items}</ul>"
         )
 
-    body += "<hr><p class=\"foot\"><a href=\"/health\">Health</a></p>"
+    body += (
+        "<hr>"
+        "<p class=\"foot\">"
+        "<a href=\"/all_cards\">All Cards board</a>"
+        " &nbsp;&middot;&nbsp; "
+        "<a href=\"/health\">Health</a>"
+        "</p>"
+    )
     return _page("Agent OS Graph Server", body)
 
 
