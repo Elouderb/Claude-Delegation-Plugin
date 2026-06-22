@@ -241,71 +241,111 @@ _CANONICAL_STATUSES = ("Created", "In Progress", "Complete")
 _MAX_CHIPS = 3
 
 
+def _load_repo_card_data(repo_root: Path) -> dict:
+    """Load card data for a single repository root.
+
+    Returns {"counts": {status: int}, "columns": {status: [card, ...]},
+             "error": str|None, "last_activity": str|None}.
+
+    Each card dict: {"card_id": str, "title": str, "priority": str|None}.
+    Missing or unreadable cards.sqlite yields empty columns (never raises).
+    Non-canonical statuses appear under "Other".
+    last_activity is the MAX(updated_at) string across all cards, or None.
+    """
+    db_path = repo_root / ".agent-os" / "cards.sqlite"
+
+    columns: dict[str, list[dict]] = {s: [] for s in _CANONICAL_STATUSES}
+    columns["Other"] = []
+    counts: dict[str, int] = {s: 0 for s in _CANONICAL_STATUSES}
+    counts["Other"] = 0
+    error: str | None = None
+    last_activity: str | None = None
+
+    if not db_path.exists():
+        # Missing DB is not an error — just empty columns.
+        pass
+    else:
+        conn = None
+        try:
+            conn = sqlite3.connect(str(db_path))
+            conn.row_factory = sqlite3.Row
+            rows = conn.execute(
+                "SELECT card_id, title, status, priority, updated_at"
+                " FROM cards ORDER BY created_at DESC"
+            ).fetchall()
+            for row in rows:
+                status = row["status"]
+                card = {
+                    "card_id": row["card_id"],
+                    "title": row["title"],
+                    "priority": row["priority"],
+                }
+                if status in _CANONICAL_STATUSES:
+                    columns[status].append(card)
+                    counts[status] += 1
+                else:
+                    columns["Other"].append(card)
+                    counts["Other"] += 1
+                # Track latest updated_at across all cards
+                ua = row["updated_at"]
+                if ua and (last_activity is None or ua > last_activity):
+                    last_activity = ua
+        except Exception:
+            print(f"_load_repo_card_data: error reading {db_path}", file=sys.stderr)
+            error = "Could not read cards database"
+            # Reset columns/counts to empty on error
+            columns = {s: [] for s in _CANONICAL_STATUSES}
+            columns["Other"] = []
+            counts = {s: 0 for s in _CANONICAL_STATUSES}
+            counts["Other"] = 0
+        finally:
+            if conn is not None:
+                conn.close()
+
+    return {
+        "counts": counts,
+        "columns": columns,
+        "error": error,
+        "last_activity": last_activity,
+    }
+
+
 def _load_all_cards_data() -> list[dict]:
     """Return per-project card data from every registered repo.
 
     Shape: [{"slug": str, "counts": {status: int}, "columns": {status: [card, ...]},
-             "error": str|None}, ...]
+             "error": str|None, "last_activity": str|None}, ...]
 
     Each card dict: {"card_id": str, "title": str, "priority": str|None}.
-    Projects are sorted by slug. Missing or unreadable cards.sqlite yields
-    empty columns (never raises). Non-canonical statuses appear under "Other".
+    Projects are sorted by last_activity DESC (most-recently active first);
+    projects with no activity sort last, tiebreaking alphabetically by slug.
+    Missing or unreadable cards.sqlite yields empty columns (never raises).
+    Non-canonical statuses appear under "Other".
     """
     registry = _load_registry()
     projects = []
     for slug in sorted(registry.keys()):
         root_str = registry[slug]
-        db_path = Path(root_str) / ".agent-os" / "cards.sqlite"
-
-        columns: dict[str, list[dict]] = {s: [] for s in _CANONICAL_STATUSES}
-        columns["Other"] = []
-        counts: dict[str, int] = {s: 0 for s in _CANONICAL_STATUSES}
-        counts["Other"] = 0
-        error: str | None = None
-
-        if not db_path.exists():
-            # Missing DB is not an error — just empty columns.
-            pass
-        else:
-            conn = None
-            try:
-                conn = sqlite3.connect(str(db_path))
-                conn.row_factory = sqlite3.Row
-                rows = conn.execute(
-                    "SELECT card_id, title, status, priority"
-                    " FROM cards ORDER BY created_at DESC"
-                ).fetchall()
-                for row in rows:
-                    status = row["status"]
-                    card = {
-                        "card_id": row["card_id"],
-                        "title": row["title"],
-                        "priority": row["priority"],
-                    }
-                    if status in _CANONICAL_STATUSES:
-                        columns[status].append(card)
-                        counts[status] += 1
-                    else:
-                        columns["Other"].append(card)
-                        counts["Other"] += 1
-            except Exception:
-                print(f"_load_all_cards_data: error reading {db_path}", file=sys.stderr)
-                error = "Could not read cards database"
-                # Reset columns/counts to empty on error
-                columns = {s: [] for s in _CANONICAL_STATUSES}
-                columns["Other"] = []
-                counts = {s: 0 for s in _CANONICAL_STATUSES}
-                counts["Other"] = 0
-            finally:
-                if conn is not None:
-                    conn.close()
-
+        repo_data = _load_repo_card_data(Path(root_str))
         projects.append({
             "slug": slug,
-            "counts": counts,
-            "columns": columns,
-            "error": error,
+            **repo_data,
         })
+
+    # Sort by last_activity DESC (most-recently active first), None last, tiebreak slug ASC.
+    # Two-pass stable sort: first tiebreak (slug ASC), then primary (activity).
+    projects.sort(key=lambda p: p["slug"])
+    projects.sort(
+        key=lambda p: (
+            # False (has activity) < True (None) → active projects first.
+            p["last_activity"] is None,
+            # Within active projects, sort DESC by timestamp. ISO datetime strings
+            # compare correctly as ASCII, so we invert each character (XOR 0x7F) to
+            # reverse the order within an ascending sort. (reverse=True can't be used
+            # here — it would also invert the slug tiebreak set by the first pass.)
+            "".join(chr(0x7F ^ ord(c)) for c in (p["last_activity"] or "")),
+        )
+    )
     return projects
 
 
@@ -660,6 +700,222 @@ def repo_index(slug: str):
     slug_u = urllib.parse.quote(slug, safe="")
     root_h = escape(str(repo_root))
 
+    # Build per-project board (server-rendered, collapsed; JS replaces via polling)
+    proj = _load_repo_card_data(repo_root)
+    err = proj["error"]
+
+    col_headers = "".join(
+        f'<div class="board-head col-label">{escape(s)}</div>'
+        for s in _CANONICAL_STATUSES
+    )
+    board_header_row = (
+        '<div class="board-head" style="color:var(--muted);font-size:0.72rem;">'
+        "Task Cards</div>" + col_headers
+    )
+
+    total = sum(proj["counts"][s] for s in _CANONICAL_STATUSES)
+    other_n = proj["counts"]["Other"]
+    other_badge = f'<div class="board-other">+{other_n} other</div>' if other_n else ""
+    needs_expand = any(len(proj["columns"][s]) > _MAX_CHIPS for s in _CANONICAL_STATUSES)
+    expand_btn = (
+        '<button class="board-expand" type="button">Expand</button>'
+        if needs_expand else ""
+    )
+    slug_cell = (
+        f'<div class="board-cell">'
+        f'<div class="board-slug"><a href="/{slug_u}/task_cards">View cards</a></div>'
+        f'<div class="board-count">{total} card{"s" if total != 1 else ""}</div>'
+        f'{other_badge}'
+        f'{expand_btn}'
+        f"</div>"
+    )
+
+    col_cells = ""
+    for status in _CANONICAL_STATUSES:
+        if err:
+            col_cells += f'<div class="board-cell"><span class="board-error">{escape(err)}</span></div>'
+        else:
+            cards_in_col = proj["columns"][status]
+            if not cards_in_col:
+                col_cells += '<div class="board-cell"><span class="board-empty">—</span></div>'
+            else:
+                chips = ""
+                for card in cards_in_col[:_MAX_CHIPS]:
+                    card_id_u = urllib.parse.quote(card["card_id"], safe="")
+                    detail_url = f"/{slug_u}/task_cards/{card_id_u}"
+                    priority_h = escape(card["priority"] or "")
+                    title_h = escape(card["title"])
+                    chips += (
+                        f'<a class="chip" href="{detail_url}">'
+                        f'<span class="chip-title">{title_h}</span>'
+                        f'<span class="chip-meta">{priority_h}</span>'
+                        f"</a>"
+                    )
+                col_cells += f'<div class="board-cell"><div class="chip-list">{chips}</div></div>'
+
+    board_row = (
+        f'<div class="board-row" data-slug="proj">'
+        f'{slug_cell}{col_cells}'
+        f'</div>'
+    )
+    board_html = (
+        f'<div class="board-wrap" id="proj-board-wrap">'
+        f'<div class="board" id="proj-board-grid">'
+        f'{board_header_row}{board_row}'
+        f'</div>'
+        f'</div>'
+    )
+
+    # Per-project poll script — fetches /<slug>/task_cards.json every 4s.
+    # Uses createElement/textContent only (no innerHTML with data) to prevent XSS.
+    # Mirrors the all-cards board pattern: closure vars expanded/lastData survive polls.
+    # Embed the slug as a JS string literal. json.dumps() does NOT escape "/",
+    # so a slug containing "</script>" (a tampered registry / malicious repo dir
+    # name) would close this <script> block and inject HTML. Escape "</" -> "<\/"
+    # (the OWASP pattern; JS reads "<\/" as "/" so the value is unchanged).
+    slug_js = json.dumps(slug).replace("</", "<\\/")
+    proj_poll_js = f"""
+<script>
+(function () {{
+  var INTERVAL = 4000;
+  var MAX_CHIPS = {_MAX_CHIPS};
+  var SLUG = {slug_js};
+  var SLUG_U = encodeURIComponent(SLUG);
+  var timer = null;
+  var paused = false;
+  var expanded = false;
+  var lastData = null;
+
+  function buildChip(card, detailUrl) {{
+    var a = document.createElement('a');
+    a.className = 'chip';
+    a.href = detailUrl;
+    var span1 = document.createElement('span');
+    span1.className = 'chip-title';
+    span1.textContent = card.title;
+    var span2 = document.createElement('span');
+    span2.className = 'chip-meta';
+    span2.textContent = card.priority || '';
+    a.appendChild(span1);
+    a.appendChild(span2);
+    return a;
+  }}
+
+  function renderBoard(data) {{
+    lastData = data;
+    var grid = document.getElementById('proj-board-grid');
+    if (!grid) return;
+    var statuses = ['Created', 'In Progress', 'Complete'];
+
+    var row = grid.querySelector('.board-row[data-slug="proj"]');
+    if (!row) {{
+      row = document.createElement('div');
+      row.className = 'board-row';
+      row.dataset.slug = 'proj';
+      grid.appendChild(row);
+    }}
+
+    while (row.firstChild) row.removeChild(row.firstChild);
+
+    var needsExpand = statuses.some(function (s) {{
+      return ((data.columns && data.columns[s]) || []).length > MAX_CHIPS;
+    }});
+
+    // Slug cell (left cell)
+    var slugCell = document.createElement('div');
+    slugCell.className = 'board-cell';
+    var slugDiv = document.createElement('div');
+    slugDiv.className = 'board-slug';
+    var slugLink = document.createElement('a');
+    slugLink.href = '/' + SLUG_U + '/task_cards';
+    slugLink.textContent = 'View cards';
+    slugDiv.appendChild(slugLink);
+    slugCell.appendChild(slugDiv);
+    var total = 0;
+    statuses.forEach(function (s) {{ total += ((data.counts && data.counts[s]) || 0); }});
+    var countDiv = document.createElement('div');
+    countDiv.className = 'board-count';
+    countDiv.textContent = total + (total === 1 ? ' card' : ' cards');
+    slugCell.appendChild(countDiv);
+    var otherN = (data.counts && data.counts['Other']) || 0;
+    if (otherN) {{
+      var otherDiv = document.createElement('div');
+      otherDiv.className = 'board-other';
+      otherDiv.textContent = '+' + otherN + ' other';
+      slugCell.appendChild(otherDiv);
+    }}
+    if (needsExpand) {{
+      var btn = document.createElement('button');
+      btn.className = 'board-expand';
+      btn.type = 'button';
+      btn.textContent = expanded ? 'Shrink' : 'Expand';
+      btn.addEventListener('click', function () {{
+        expanded = !expanded;
+        if (lastData) renderBoard(lastData);
+      }});
+      slugCell.appendChild(btn);
+    }}
+    row.appendChild(slugCell);
+
+    statuses.forEach(function (status) {{
+      var cell = document.createElement('div');
+      cell.className = 'board-cell';
+      if (data.error) {{
+        var errSpan = document.createElement('span');
+        errSpan.className = 'board-error';
+        errSpan.textContent = data.error;
+        cell.appendChild(errSpan);
+      }} else {{
+        var allCards = (data.columns && data.columns[status]) || [];
+        var cards = expanded ? allCards : allCards.slice(0, MAX_CHIPS);
+        if (cards.length === 0) {{
+          var emptySpan = document.createElement('span');
+          emptySpan.className = 'board-empty';
+          emptySpan.textContent = '—';
+          cell.appendChild(emptySpan);
+        }} else {{
+          var chipList = document.createElement('div');
+          chipList.className = 'chip-list';
+          cards.forEach(function (card) {{
+            var detailUrl = '/' + SLUG_U + '/task_cards/' + encodeURIComponent(card.card_id);
+            chipList.appendChild(buildChip(card, detailUrl));
+          }});
+          cell.appendChild(chipList);
+        }}
+      }}
+      row.appendChild(cell);
+    }});
+  }}
+
+  function poll() {{
+    if (paused) return;
+    fetch('/' + SLUG_U + '/task_cards.json')
+      .then(function (r) {{ return r.json(); }})
+      .then(renderBoard)
+      .catch(function () {{ /* ignore transient errors */ }});
+  }}
+
+  function startPolling() {{
+    if (timer) clearInterval(timer);
+    timer = setInterval(poll, INTERVAL);
+  }}
+
+  document.addEventListener('visibilitychange', function () {{
+    if (document.hidden) {{
+      paused = true;
+    }} else {{
+      paused = false;
+      poll();
+      startPolling();
+    }}
+  }});
+
+  poll();
+  startPolling();
+}}());
+</script>
+"""
+
     body = f"""  <p class="crumb"><a href="/">← All repositories</a></p>
   <h1>{slug_h}</h1>
   <p class="sub">{root_h}</p>
@@ -684,8 +940,10 @@ def repo_index(slug: str):
       <a href="/{slug_u}/task_cards">View cards</a>
     </div>
   </div>
+  {board_html}
   <hr>
-  <p class="foot"><a href="/{slug_u}/health">Health check</a></p>"""
+  <p class="foot"><a href="/{slug_u}/health">Health check</a></p>
+  {proj_poll_js}"""
     return _page(f"{slug_h} — Agent OS", body)
 
 
@@ -709,6 +967,28 @@ def db_graph(slug: str):
     if not html_file.exists():
         return _missing_file(slug, "Database graph not found — refresh via the repo page")
     return send_from_directory(str(db_graph_dir), html_file.name)
+
+
+@app.get("/<slug>/task_cards.json")
+def task_cards_json(slug: str):
+    """Return this project's live card data as JSON.
+
+    Shape: {"slug": str, "counts": {...}, "columns": {...}, "error": str|None}.
+    Unknown slug → 404 HTML (via _slug_not_found). Missing/corrupt DB → empty
+    columns with error key, never 500.
+    """
+    repo_root = _repo_root_for_slug(slug)
+    if repo_root is None:
+        return _slug_not_found(slug)
+    data = _load_repo_card_data(repo_root)
+    # Enumerate the public fields explicitly (don't spread **data) so the internal
+    # `last_activity` sort key isn't exposed — matches the all_cards.json shape.
+    return jsonify({
+        "slug": slug,
+        "counts": data["counts"],
+        "columns": data["columns"],
+        "error": data["error"],
+    })
 
 
 @app.get("/<slug>/task_cards")

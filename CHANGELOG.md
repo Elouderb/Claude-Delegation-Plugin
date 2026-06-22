@@ -4,6 +4,35 @@ All notable changes to the **agent-os** plugin are documented here. The format i
 based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/), and this project
 adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.2.6] - 2026-06-22
+
+### Added
+- **Per-project live task-card board on the project page.** Each
+  `/<slug>/` repo page now renders the same 3-column board (Created / In Progress
+  / Complete) below the graph tiles, served by a new `GET /<slug>/task_cards.json`
+  and polled every 4s — top-3-per-column with a per-project Expand/Shrink toggle
+  (expand state survives the live polls), chips linking to the card detail page.
+  The "View cards" table link is preserved.
+- **`/all_cards` rows sorted by recent activity.** Project rows are ordered by
+  each project's most-recent card update (`MAX(updated_at)`) descending, with
+  no-activity projects last (slug tiebreak), so the most active projects rise to
+  the top.
+
+### Fixed
+- **Tests no longer leak temp directories into `/tmp`.** `test_hook_common.py`
+  and `test_code_graph_tools.py` created `tempfile.mkdtemp()` dirs without
+  guaranteed teardown; they now use recognizable prefixes and `addCleanup` so the
+  directories are removed even when a test fails.
+
+### Security
+- The slug is embedded into the per-project board's inline `<script>` as a JS
+  string literal; since `json.dumps()` does not escape `/`, a registry slug
+  containing `</script>` (e.g. a tampered `active_repos.json` or a malicious repo
+  directory name) could break out of the script block. It is now escaped
+  (`</` → `<\/`, the OWASP pattern) with a regression test. The
+  `GET /<slug>/task_cards.json` route is read-only, escapes nothing into HTML
+  (JSON only), 404s an unknown slug, and never 500s on a missing/corrupt DB.
+
 ## [0.2.5] - 2026-06-22
 
 ### Added

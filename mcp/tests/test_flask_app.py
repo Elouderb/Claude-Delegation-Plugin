@@ -1001,5 +1001,386 @@ class TestAllCardsRoutes(_AppTestCase):
                          "board link must not be in the footer paragraph")
 
 
+class TestPerProjectTaskCardsJson(_AppTestCase):
+    """Tests for GET /<slug>/task_cards.json — per-project card data JSON."""
+
+    def _make_root(self, tmpdir: str) -> Path:
+        root = Path(tmpdir)
+        agent_os = root / ".agent-os"
+        agent_os.mkdir(parents=True, exist_ok=True)
+        db_path = agent_os / "cards.sqlite"
+        conn = sqlite3.connect(str(db_path))
+        conn.execute("""
+            CREATE TABLE cards (
+                card_id TEXT PRIMARY KEY,
+                title TEXT NOT NULL,
+                description TEXT,
+                status TEXT NOT NULL,
+                priority TEXT,
+                created_at TIMESTAMP,
+                updated_at TIMESTAMP
+            )
+        """)
+        conn.commit()
+        conn.close()
+        self.addCleanup(lambda: None)  # tmpdir is managed by the caller
+        return root
+
+    def _insert_card(self, root: Path, card_id: str, title: str,
+                     status: str = "Created", priority: str = "medium",
+                     updated_at: str = "2026-01-02T00:00:00"):
+        db_path = root / ".agent-os" / "cards.sqlite"
+        conn = sqlite3.connect(str(db_path))
+        conn.execute(
+            "INSERT INTO cards VALUES (?,?,?,?,?,?,?)",
+            (card_id, title, None, status, priority, "2026-01-01T00:00:00", updated_at),
+        )
+        conn.commit()
+        conn.close()
+
+    def test_known_slug_returns_200(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = self._make_root(tmpdir)
+            with self._patch_slug("my-repo", root):
+                resp = self.client.get("/my-repo/task_cards.json")
+        self.assertEqual(resp.status_code, 200)
+
+    def test_response_shape(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = self._make_root(tmpdir)
+            self._insert_card(root, "card0001", "A Card", status="Created")
+            with self._patch_slug("my-repo", root):
+                resp = self.client.get("/my-repo/task_cards.json")
+        data = json.loads(resp.data)
+        self.assertEqual(data["slug"], "my-repo")
+        self.assertIn("counts", data)
+        self.assertIn("columns", data)
+        self.assertIn("Created", data["columns"])
+        self.assertIn("In Progress", data["columns"])
+        self.assertIn("Complete", data["columns"])
+        self.assertIn("error", data)
+
+    def test_unknown_slug_returns_404(self):
+        with self._patch_slug("my-repo", None):
+            resp = self.client.get("/nonexistent/task_cards.json")
+        self.assertEqual(resp.status_code, 404)
+
+    def test_missing_db_returns_empty_columns_not_500(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)  # no .agent-os/cards.sqlite
+            with self._patch_slug("no-db", root):
+                resp = self.client.get("/no-db/task_cards.json")
+        self.assertEqual(resp.status_code, 200)
+        data = json.loads(resp.data)
+        self.assertIsNone(data["error"])
+        self.assertEqual(data["columns"]["Created"], [])
+
+    def test_cards_appear_in_correct_column(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = self._make_root(tmpdir)
+            self._insert_card(root, "c0000001", "Created Card", status="Created")
+            self._insert_card(root, "c0000002", "InProg Card", status="In Progress")
+            self._insert_card(root, "c0000003", "Done Card", status="Complete")
+            with self._patch_slug("repo", root):
+                resp = self.client.get("/repo/task_cards.json")
+        data = json.loads(resp.data)
+        self.assertEqual(len(data["columns"]["Created"]), 1)
+        self.assertEqual(data["columns"]["Created"][0]["title"], "Created Card")
+        self.assertEqual(len(data["columns"]["In Progress"]), 1)
+        self.assertEqual(len(data["columns"]["Complete"]), 1)
+
+    def test_corrupt_db_returns_empty_columns_with_error(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            agent_os = root / ".agent-os"
+            agent_os.mkdir(parents=True)
+            (agent_os / "cards.sqlite").write_bytes(b"not a sqlite database")
+            with self._patch_slug("corrupt", root):
+                resp = self.client.get("/corrupt/task_cards.json")
+        self.assertEqual(resp.status_code, 200)
+        data = json.loads(resp.data)
+        self.assertIsNotNone(data["error"])
+        self.assertEqual(data["columns"]["Created"], [])
+
+
+class TestRepoIndexBoard(_AppTestCase):
+    """Tests for the per-project board rendered on GET /<slug>/."""
+
+    def _make_root(self, tmpdir: str) -> Path:
+        root = Path(tmpdir)
+        agent_os = root / ".agent-os"
+        agent_os.mkdir(parents=True, exist_ok=True)
+        db_path = agent_os / "cards.sqlite"
+        conn = sqlite3.connect(str(db_path))
+        conn.execute("""
+            CREATE TABLE cards (
+                card_id TEXT PRIMARY KEY,
+                title TEXT NOT NULL,
+                description TEXT,
+                status TEXT NOT NULL,
+                priority TEXT,
+                created_at TIMESTAMP,
+                updated_at TIMESTAMP
+            )
+        """)
+        conn.commit()
+        conn.close()
+        return root
+
+    def _insert_card(self, root: Path, card_id: str, title: str,
+                     status: str = "Created",
+                     created_at: str = "2026-01-01T00:00:00"):
+        db_path = root / ".agent-os" / "cards.sqlite"
+        conn = sqlite3.connect(str(db_path))
+        conn.execute(
+            "INSERT INTO cards VALUES (?,?,?,?,?,?,?)",
+            (card_id, title, None, status, "medium", created_at, "2026-01-02T00:00:00"),
+        )
+        conn.commit()
+        conn.close()
+
+    def test_board_has_three_status_column_headers(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = self._make_root(tmpdir)
+            with self._patch_slug("my-repo", root):
+                resp = self.client.get("/my-repo/")
+        body = resp.data.decode()
+        self.assertIn("Created", body)
+        self.assertIn("In Progress", body)
+        self.assertIn("Complete", body)
+
+    def test_board_chips_link_to_card_detail(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = self._make_root(tmpdir)
+            self._insert_card(root, "abc12345", "My Card", status="Created")
+            with self._patch_slug("my-repo", root):
+                resp = self.client.get("/my-repo/")
+        body = resp.data.decode()
+        self.assertIn("/my-repo/task_cards/abc12345", body)
+
+    def test_board_top3_cap_server_rendered(self):
+        """Server HTML must render at most 3 chips per column."""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = self._make_root(tmpdir)
+            for i in range(5):
+                self._insert_card(root, f"c000000{i}", f"Card {i}", status="Created",
+                                  created_at=f"2026-01-0{i+1}T00:00:00")
+            with self._patch_slug("my-repo", root):
+                resp = self.client.get("/my-repo/")
+        body = resp.data.decode()
+        chip_count = body.count('class="chip"')
+        self.assertEqual(chip_count, 3)
+
+    def test_board_expand_button_present_when_column_gt3(self):
+        """Expand button must appear in the board when any column exceeds 3."""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = self._make_root(tmpdir)
+            for i in range(4):
+                self._insert_card(root, f"c000000{i}", f"Card {i}", status="Created",
+                                  created_at=f"2026-01-0{i+1}T00:00:00")
+            with self._patch_slug("my-repo", root):
+                resp = self.client.get("/my-repo/")
+        body = resp.data.decode()
+        self.assertIn('<button class="board-expand"', body)
+
+    def test_board_expand_button_absent_when_columns_le3(self):
+        """Expand button must NOT appear when all columns have 3 or fewer cards."""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = self._make_root(tmpdir)
+            for i in range(3):
+                self._insert_card(root, f"c000000{i}", f"Card {i}", status="Created")
+            with self._patch_slug("my-repo", root):
+                resp = self.client.get("/my-repo/")
+        body = resp.data.decode()
+        self.assertNotIn('<button class="board-expand"', body)
+
+    def test_view_cards_link_still_present(self):
+        """The existing 'View cards' table link must remain on the page."""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = self._make_root(tmpdir)
+            with self._patch_slug("my-repo", root):
+                resp = self.client.get("/my-repo/")
+        body = resp.data.decode()
+        self.assertIn("/my-repo/task_cards", body)
+
+    def test_poll_script_present(self):
+        """Page must include the per-project poll script targeting task_cards.json."""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = self._make_root(tmpdir)
+            with self._patch_slug("my-repo", root):
+                resp = self.client.get("/my-repo/")
+        body = resp.data.decode()
+        self.assertIn("task_cards.json", body)
+        self.assertIn("setInterval", body)
+
+
+class TestAllCardsActivitySort(_AppTestCase):
+    """Tests for /all_cards and /all_cards.json project ordering by last_activity."""
+
+    def _make_root_with_cards(self, tmpdir: str,
+                               cards: list[tuple]) -> Path:
+        """Create repo with given cards. cards: [(card_id, title, status, updated_at)]."""
+        root = Path(tmpdir)
+        agent_os = root / ".agent-os"
+        agent_os.mkdir(parents=True, exist_ok=True)
+        db_path = agent_os / "cards.sqlite"
+        conn = sqlite3.connect(str(db_path))
+        conn.execute("""
+            CREATE TABLE cards (
+                card_id TEXT PRIMARY KEY,
+                title TEXT NOT NULL,
+                description TEXT,
+                status TEXT NOT NULL,
+                priority TEXT,
+                created_at TIMESTAMP,
+                updated_at TIMESTAMP
+            )
+        """)
+        for card_id, title, status, updated_at in cards:
+            conn.execute(
+                "INSERT INTO cards VALUES (?,?,?,?,?,?,?)",
+                (card_id, title, None, status, "medium",
+                 "2026-01-01T00:00:00", updated_at),
+            )
+        conn.commit()
+        conn.close()
+        return root
+
+    def _make_empty_root(self, tmpdir: str) -> Path:
+        """Create repo with DB but no cards (no activity)."""
+        root = Path(tmpdir)
+        agent_os = root / ".agent-os"
+        agent_os.mkdir(parents=True, exist_ok=True)
+        db_path = agent_os / "cards.sqlite"
+        conn = sqlite3.connect(str(db_path))
+        conn.execute("""
+            CREATE TABLE cards (
+                card_id TEXT PRIMARY KEY,
+                title TEXT NOT NULL,
+                description TEXT,
+                status TEXT NOT NULL,
+                priority TEXT,
+                created_at TIMESTAMP,
+                updated_at TIMESTAMP
+            )
+        """)
+        conn.commit()
+        conn.close()
+        return root
+
+    def test_all_cards_json_sorted_by_last_activity_desc(self):
+        """Projects with more-recent activity appear first in /all_cards.json."""
+        with tempfile.TemporaryDirectory() as td1, \
+             tempfile.TemporaryDirectory() as td2:
+            root_old = self._make_root_with_cards(td1, [
+                ("c0000001", "Old Card", "Created", "2026-01-01T00:00:00"),
+            ])
+            root_new = self._make_root_with_cards(td2, [
+                ("c0000002", "New Card", "Created", "2026-06-01T00:00:00"),
+            ])
+            registry = {"alpha": str(root_old), "beta": str(root_new)}
+            with self._patch_registry(registry):
+                resp = self.client.get("/all_cards.json")
+        data = json.loads(resp.data)
+        slugs = [p["slug"] for p in data["projects"]]
+        # beta has newer activity → must appear first
+        self.assertEqual(slugs[0], "beta")
+        self.assertEqual(slugs[1], "alpha")
+
+    def test_all_cards_json_no_activity_projects_last(self):
+        """Projects with no cards/activity must sort after active projects."""
+        with tempfile.TemporaryDirectory() as td1, \
+             tempfile.TemporaryDirectory() as td2, \
+             tempfile.TemporaryDirectory() as td3:
+            root_active = self._make_root_with_cards(td1, [
+                ("c0000001", "Active Card", "Created", "2026-01-15T00:00:00"),
+            ])
+            root_empty1 = self._make_empty_root(td2)
+            root_empty2 = self._make_empty_root(td3)
+            registry = {
+                "zzz-active": str(root_active),
+                "aaa-empty": str(root_empty1),
+                "bbb-empty": str(root_empty2),
+            }
+            with self._patch_registry(registry):
+                resp = self.client.get("/all_cards.json")
+        data = json.loads(resp.data)
+        slugs = [p["slug"] for p in data["projects"]]
+        # Active project first, then empty projects in slug order
+        self.assertEqual(slugs[0], "zzz-active")
+        # Empty projects sort after active, alphabetically
+        self.assertIn("aaa-empty", slugs[1:])
+        self.assertIn("bbb-empty", slugs[1:])
+
+    def test_all_cards_json_empty_repos_tiebreak_by_slug(self):
+        """When activity is equal (all empty), fall back to slug alphabetical order."""
+        with tempfile.TemporaryDirectory() as td1, \
+             tempfile.TemporaryDirectory() as td2:
+            root_z = self._make_empty_root(td1)
+            root_a = self._make_empty_root(td2)
+            registry = {"zzz": str(root_z), "aaa": str(root_a)}
+            with self._patch_registry(registry):
+                resp = self.client.get("/all_cards.json")
+        data = json.loads(resp.data)
+        slugs = [p["slug"] for p in data["projects"]]
+        self.assertEqual(slugs, sorted(slugs))
+
+    def test_all_cards_html_sorted_by_last_activity_desc(self):
+        """/all_cards HTML must present projects most-recently-active first."""
+        with tempfile.TemporaryDirectory() as td1, \
+             tempfile.TemporaryDirectory() as td2:
+            root_old = self._make_root_with_cards(td1, [
+                ("c0000001", "Old Card", "Created", "2026-01-01T00:00:00"),
+            ])
+            root_new = self._make_root_with_cards(td2, [
+                ("c0000002", "New Card", "Created", "2026-06-01T00:00:00"),
+            ])
+            registry = {"alpha": str(root_old), "beta": str(root_new)}
+            with self._patch_registry(registry):
+                resp = self.client.get("/all_cards")
+        body = resp.data.decode()
+        pos_beta = body.find("beta")
+        pos_alpha = body.find("alpha")
+        self.assertGreater(pos_beta, -1)
+        self.assertGreater(pos_alpha, -1)
+        self.assertLess(pos_beta, pos_alpha, "beta (newer) must appear before alpha (older)")
+
+
+class TestRepoIndexInlineScriptXSS(_AppTestCase):
+    """The slug is embedded into the per-project board's inline <script> as a JS
+    string literal; a slug containing </script> must be escaped so it cannot break
+    out of the <script> block. Slugs come from the registry and Flask routing
+    rejects </> in URL path segments, so we invoke the view directly (defense-in-
+    depth against a tampered active_repos.json / malicious repo directory name)."""
+
+    def _empty_repo(self) -> Path:
+        import shutil
+        tmp = tempfile.mkdtemp(prefix="agent_os_xsstest_")
+        self.addCleanup(shutil.rmtree, tmp, True)
+        agent_os = Path(tmp) / ".agent-os"
+        agent_os.mkdir(parents=True)
+        conn = sqlite3.connect(str(agent_os / "cards.sqlite"))
+        conn.execute(
+            "CREATE TABLE cards (card_id TEXT PRIMARY KEY, title TEXT NOT NULL,"
+            " description TEXT, status TEXT NOT NULL, priority TEXT,"
+            " created_at TIMESTAMP, updated_at TIMESTAMP)"
+        )
+        conn.commit()
+        conn.close()
+        return Path(tmp)
+
+    def test_script_breakout_slug_is_escaped(self):
+        xss_slug = "pre</script><svg onload=alert(1)>post"
+        root = self._empty_repo()
+        with patch.object(flask_app_module, "_repo_root_for_slug", return_value=root):
+            with _app.test_request_context():
+                resp = flask_app_module.repo_index(xss_slug)
+        body = resp.get_data(as_text=True)
+        # The raw breakout sequence must NOT survive anywhere in the page.
+        self.assertNotIn("</script><svg onload", body)
+        # The slug must appear in the inline script in its escaped (</ -> <\/) form.
+        self.assertIn(r"<\/script>", body)
+
+
 if __name__ == "__main__":
     unittest.main()
