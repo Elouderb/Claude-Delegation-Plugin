@@ -4,6 +4,41 @@ All notable changes to the **agent-os** plugin are documented here. The format i
 based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/), and this project
 adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.2.5] - 2026-06-22
+
+### Added
+- **Cross-project "All Cards" board in the graph UI.** A new top-level
+  `GET /all_cards` renders a Jira-style board across every registered repository:
+  one row per project, three status columns (Created / In Progress / Complete),
+  with compact card chips that each link to the existing card detail page. It is
+  view-only and live — an inline script polls `GET /all_cards.json` every 4s
+  (paused when the tab is hidden) and re-renders the grid in place, so chips move
+  between columns as card statuses change with no manual refresh. The board is
+  server-rendered first (works without JS), surfaces any non-canonical-status
+  cards via a "+N other" badge without inflating the per-project count, and is
+  linked from the index page. A missing or corrupt per-repo `cards.sqlite` shows
+  empty columns / an inline error rather than failing the whole board.
+- **Top-3-per-column with per-project Expand/Shrink.** Each column initially
+  shows the 3 most-recently-created cards; an Expand button appears in the
+  project's slug cell whenever any column holds more than 3 cards. Clicking
+  toggles all columns open (Shrink to collapse). Expand state persists across
+  the 4 s live polls — the JS `renderBoard` reads per-slug state from
+  `expanded[slug]` so expanded projects never snap back. The static server render
+  uses the same 3-card cap; the first JS poll replaces it promptly. Cards are
+  ordered by `created_at DESC` (matching the per-project `/task_cards` view).
+- **Prominent "All Cards board" button on the index page.** A styled
+  `.board-link-btn` anchor now appears directly under the `<h1>` heading — above
+  the repository list in both the populated and empty-registry states. The text
+  link that was previously in the footer has been removed (Health remains there).
+
+### Security
+- All card data is XSS-safe on both render paths: the server `escape()`s every
+  DB-sourced field and `urllib.parse.quote`s URL components (including the
+  `data-slug` the poll script reconciles on), and the client builds DOM via
+  `createElement` + `textContent` with `encodeURIComponent` hrefs and no
+  `innerHTML`. The routes are read-only `GET`s with no user input reaching SQL or
+  the filesystem.
+
 ## [0.2.4] - 2026-06-22
 
 ### Fixed
