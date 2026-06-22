@@ -616,13 +616,13 @@ class TestAllCardsRoutes(_AppTestCase):
 
     def _insert_card(self, root: Path, card_id: str, title: str,
                      status: str = "Created", priority: str = "medium",
-                     updated_at: str = "2026-01-02T00:00:00"):
+                     updated_at: str = "2026-01-02T00:00:00",
+                     created_at: str = "2026-01-01T00:00:00"):
         db_path = root / ".agent-os" / "cards.sqlite"
         conn = sqlite3.connect(str(db_path))
         conn.execute(
             "INSERT INTO cards VALUES (?,?,?,?,?,?,?)",
-            (card_id, title, None, status, priority,
-             "2026-01-01T00:00:00", updated_at),
+            (card_id, title, None, status, priority, created_at, updated_at),
         )
         conn.commit()
         conn.close()
@@ -881,6 +881,124 @@ class TestAllCardsRoutes(_AppTestCase):
         body = resp.data.decode()
         self.assertIn("1 card</div>", body)   # count excludes the Other-status card
         self.assertIn("+1 other", body)       # but the off-status card is surfaced
+
+    # ── top-3 chip limit + Expand button (AC: Part A) ─────────────────────────
+
+    def test_all_cards_top3_shown_when_column_exceeds_3(self):
+        """Server HTML must show at most 3 chips per column when >3 cards exist."""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = self._make_repo(tmpdir)
+            for i in range(5):
+                self._insert_card(root, f"c000000{i}", f"Card {i}", status="Created",
+                                  created_at=f"2026-01-0{i+1}T00:00:00")
+            registry = self._registry_from_roots({"repo": root})
+            with self._patch_registry(registry):
+                resp = self.client.get("/all_cards")
+        body = resp.data.decode()
+        # Only 3 chips can appear — count chip anchor elements in body
+        chip_count = body.count('class="chip"')
+        self.assertEqual(chip_count, 3)
+
+    def test_all_cards_top3_are_newest_by_created_at(self):
+        """The 3 chips shown must be the 3 most-recently-created cards."""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = self._make_repo(tmpdir)
+            # Insert 5 cards with distinct created_at timestamps; newest = card4, card3, card2
+            for i in range(5):
+                self._insert_card(root, f"c000000{i}", f"Title{i}", status="Created",
+                                  created_at=f"2026-01-0{i+1}T00:00:00")
+            registry = self._registry_from_roots({"repo": root})
+            with self._patch_registry(registry):
+                resp = self.client.get("/all_cards")
+        body = resp.data.decode()
+        # Newest 3 (indexes 4, 3, 2 → most-recent creation) must appear
+        self.assertIn("Title4", body)
+        self.assertIn("Title3", body)
+        self.assertIn("Title2", body)
+        # Oldest 2 must NOT appear
+        self.assertNotIn("Title0", body)
+        self.assertNotIn("Title1", body)
+
+    def test_all_cards_expand_button_present_when_column_gt3(self):
+        """Expand button must appear in the slug cell when any column has >3 cards."""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = self._make_repo(tmpdir)
+            for i in range(4):
+                self._insert_card(root, f"c000000{i}", f"Card {i}", status="Created",
+                                  created_at=f"2026-01-0{i+1}T00:00:00")
+            registry = self._registry_from_roots({"repo": root})
+            with self._patch_registry(registry):
+                resp = self.client.get("/all_cards")
+        body = resp.data.decode()
+        # The actual button element must appear in the HTML (not just the JS class string)
+        self.assertIn('<button class="board-expand"', body)
+
+    def test_all_cards_expand_button_absent_when_all_columns_le3(self):
+        """Expand button must NOT appear when all columns have ≤3 cards."""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = self._make_repo(tmpdir)
+            # 3 Created, 1 In Progress, 1 Complete — none exceed 3
+            for i in range(3):
+                self._insert_card(root, f"c00000{i}a", f"Created {i}", status="Created")
+            self._insert_card(root, "c000010b", "InProg 1", status="In Progress")
+            self._insert_card(root, "c000010c", "Done 1", status="Complete")
+            registry = self._registry_from_roots({"repo": root})
+            with self._patch_registry(registry):
+                resp = self.client.get("/all_cards")
+        body = resp.data.decode()
+        # No actual button element — the JS class string will still be present
+        self.assertNotIn('<button class="board-expand"', body)
+
+    def test_all_cards_json_returns_all_cards_not_top3(self):
+        """/all_cards.json must return ALL cards, not just the 3 shown in HTML."""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = self._make_repo(tmpdir)
+            for i in range(5):
+                self._insert_card(root, f"c000000{i}", f"Card {i}", status="Created",
+                                  created_at=f"2026-01-0{i+1}T00:00:00")
+            registry = self._registry_from_roots({"repo": root})
+            with self._patch_registry(registry):
+                resp = self.client.get("/all_cards.json")
+        data = json.loads(resp.data)
+        col = data["projects"][0]["columns"]["Created"]
+        self.assertEqual(len(col), 5)
+
+    # ── prominent board link (AC: Part B) ─────────────────────────────────────
+
+    def test_all_cards_prominent_board_link_near_top(self):
+        """The board link button must appear BEFORE the repo list, not only in the footer."""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = self._make_repo(tmpdir)
+            registry = self._registry_from_roots({"repo": root})
+            with self._patch_registry(registry):
+                resp = self.client.get("/")
+        body = resp.data.decode()
+        # The prominent link must appear before <ul class="repos">
+        board_pos = body.find("board-link-btn")
+        repo_list_pos = body.find('class="repos"')
+        self.assertGreater(board_pos, -1, "board-link-btn class not found in index HTML")
+        self.assertGreater(repo_list_pos, -1, "'repos' list not found in index HTML")
+        self.assertLess(board_pos, repo_list_pos,
+                        "board-link-btn must appear before the repo list")
+
+    def test_all_cards_prominent_board_link_empty_registry(self):
+        """The prominent board link must also appear when the registry is empty."""
+        with self._patch_registry({}):
+            resp = self.client.get("/")
+        body = resp.data.decode()
+        self.assertIn("board-link-btn", body)
+
+    def test_all_cards_link_not_in_footer(self):
+        """The /all_cards link must no longer appear in the footer paragraph."""
+        with self._patch_registry({}):
+            resp = self.client.get("/")
+        body = resp.data.decode()
+        # Footer paragraph contains Health; All Cards link must NOT be in the foot <p>
+        foot_start = body.find('class="foot"')
+        self.assertGreater(foot_start, -1, "Footer paragraph not found")
+        foot_text = body[foot_start:]
+        self.assertNotIn("/all_cards", foot_text,
+                         "board link must not be in the footer paragraph")
 
 
 if __name__ == "__main__":

@@ -137,6 +137,21 @@ _PAGE_CSS = """
   .chip-meta { font-size:0.7rem; color:var(--muted); margin-top:1px; }
   .board-empty { font-size:0.78rem; color:var(--muted); font-style:italic; }
   .board-error { font-size:0.78rem; color:#e3463a; }
+  .board-expand {
+    display:inline-block; margin-top:5px; padding:2px 10px;
+    font-size:0.72rem; font-weight:600; cursor:pointer;
+    color:var(--accent); background:transparent;
+    border:1px solid var(--accent); border-radius:6px;
+    letter-spacing:0.03em; line-height:1.6;
+  }
+  .board-expand:hover { background:rgba(88,166,255,0.1); }
+  .board-link-btn {
+    display:inline-block; margin:16px 0 0;
+    padding:9px 20px; font-size:0.94rem; font-weight:600;
+    color:#0f1115; background:var(--accent);
+    border-radius:8px; text-decoration:none; letter-spacing:-0.01em;
+  }
+  .board-link-btn:hover { background:#79c0ff; text-decoration:none; }
 """
 
 
@@ -221,6 +236,10 @@ def _missing_file(slug: str, msg: str) -> Response:
 
 _CANONICAL_STATUSES = ("Created", "In Progress", "Complete")
 
+# Collapsed-view cap: chips shown per column before the per-project Expand toggle
+# reveals the rest. Mirrors `var MAX_CHIPS` in the board's poll JS — keep in sync.
+_MAX_CHIPS = 3
+
 
 def _load_all_cards_data() -> list[dict]:
     """Return per-project card data from every registered repo.
@@ -254,7 +273,7 @@ def _load_all_cards_data() -> list[dict]:
                 conn.row_factory = sqlite3.Row
                 rows = conn.execute(
                     "SELECT card_id, title, status, priority"
-                    " FROM cards ORDER BY updated_at DESC, created_at DESC"
+                    " FROM cards ORDER BY created_at DESC"
                 ).fetchall()
                 for row in rows:
                     status = row["status"]
@@ -317,15 +336,24 @@ def all_cards():
         total = sum(proj["counts"][s] for s in _CANONICAL_STATUSES)
         other_n = proj["counts"]["Other"]
         other_badge = f'<div class="board-other">+{other_n} other</div>' if other_n else ""
+        # Expand button: shown only when any canonical column has >3 cards.
+        # Server render is always collapsed (default state before JS loads).
+        needs_expand = any(len(proj["columns"][s]) > _MAX_CHIPS for s in _CANONICAL_STATUSES)
+        expand_btn = (
+            '<button class="board-expand" type="button">Expand</button>'
+            if needs_expand else ""
+        )
         slug_cell = (
             f'<div class="board-cell">'
             f'<div class="board-slug"><a href="/{slug_u}/task_cards">{slug_h}</a></div>'
             f'<div class="board-count">{total} card{"s" if total != 1 else ""}</div>'
             f'{other_badge}'
+            f'{expand_btn}'
             f"</div>"
         )
 
-        # Column cells
+        # Column cells — server render shows only the first _MAX_CHIPS chips
+        # (collapsed). JS renderBoard() mirrors this and uses the live expand[] state.
         col_cells = ""
         for status in _CANONICAL_STATUSES:
             if err:
@@ -336,7 +364,7 @@ def all_cards():
                     col_cells += '<div class="board-cell"><span class="board-empty">—</span></div>'
                 else:
                     chips = ""
-                    for card in cards_in_col:
+                    for card in cards_in_col[:_MAX_CHIPS]:
                         card_id_u = urllib.parse.quote(card["card_id"], safe="")
                         detail_url = f"/{slug_u}/task_cards/{card_id_u}"
                         priority_h = escape(card["priority"] or "")
@@ -369,15 +397,21 @@ def all_cards():
     # rendered via DOM APIs only (no innerHTML with data) to prevent XSS.
     # NOTE: renderBoard() below must mirror the server-rendered board structure
     # above (cell order, classes, the count + "+N other" badge, card/cards
-    # pluralization) — the first poll replaces the server DOM with the JS DOM, so
-    # any structural change must be made in BOTH places to avoid a visible reshape.
+    # pluralization, top-3 collapse, expand button) — the first poll replaces
+    # the server DOM with the JS DOM, so any structural change must be made in
+    # BOTH places to avoid a visible reshape.
     poll_js = """
 <script>
 (function () {
   var INTERVAL = 4000;
+  var MAX_CHIPS = 3;
   var timer = null;
   var paused = false;
   var liveEl = document.getElementById('board-live-status');
+  // Per-slug expand state — survives every poll re-render (key requirement).
+  var expanded = {};
+  // Last fetched data — lets expand/shrink clicks re-render without a refetch.
+  var lastData = null;
 
   function setPaused(v) {
     paused = v;
@@ -403,6 +437,7 @@ def all_cards():
   }
 
   function renderBoard(data) {
+    lastData = data;
     var grid = document.getElementById('board-grid');
     if (!grid) return;
     var projects = data.projects || [];
@@ -434,6 +469,12 @@ def all_cards():
       // Rebuild cells
       while (row.firstChild) row.removeChild(row.firstChild);
 
+      // Determine if any column has >3 cards (drives expand button visibility)
+      var needsExpand = statuses.some(function (s) {
+        return ((proj.columns && proj.columns[s]) || []).length > MAX_CHIPS;
+      });
+      var isExpanded = !!expanded[proj.slug];
+
       // Slug cell
       var slugCell = document.createElement('div');
       slugCell.className = 'board-cell';
@@ -457,9 +498,24 @@ def all_cards():
         otherDiv.textContent = '+' + otherN + ' other';
         slugCell.appendChild(otherDiv);
       }
+      // Expand/Shrink button — only when some column exceeds MAX_CHIPS.
+      // Handler toggles expanded[slug] and re-renders from lastData.
+      if (needsExpand) {
+        var btn = document.createElement('button');
+        btn.className = 'board-expand';
+        btn.type = 'button';
+        btn.textContent = isExpanded ? 'Shrink' : 'Expand';
+        (function (slug) {
+          btn.addEventListener('click', function () {
+            expanded[slug] = !expanded[slug];
+            if (lastData) renderBoard(lastData);
+          });
+        }(proj.slug));
+        slugCell.appendChild(btn);
+      }
       row.appendChild(slugCell);
 
-      // Status column cells
+      // Status column cells — show all cards when expanded, top-3 when collapsed.
       statuses.forEach(function (status) {
         var cell = document.createElement('div');
         cell.className = 'board-cell';
@@ -469,7 +525,8 @@ def all_cards():
           errSpan.textContent = proj.error;
           cell.appendChild(errSpan);
         } else {
-          var cards = (proj.columns && proj.columns[status]) || [];
+          var allCards = (proj.columns && proj.columns[status]) || [];
+          var cards = isExpanded ? allCards : allCards.slice(0, MAX_CHIPS);
           if (cards.length === 0) {
             var emptySpan = document.createElement('span');
             emptySpan.className = 'board-empty';
@@ -524,6 +581,9 @@ def all_cards():
     }
   });
 
+  // Fire one immediate poll so the interactive JS buttons replace the static
+  // server-rendered (inert) ones as fast as possible after page load.
+  poll();
   startPolling();
 }());
 </script>
@@ -560,9 +620,11 @@ def all_cards_json():
 @app.get("/")
 def index():
     registry = _load_registry()
+    board_btn = '<a class="board-link-btn" href="/all_cards">All Cards board</a>'
     if not registry:
         body = (
             "<h1>Agent OS</h1>"
+            f"{board_btn}"
             "<p class=\"lead\">No repositories registered yet. Open a Claude Code session "
             "in a repository — the Agent OS plugin registers it automatically.</p>"
         )
@@ -574,6 +636,7 @@ def index():
         )
         body = (
             "<h1>Agent OS</h1>"
+            f"{board_btn}"
             "<p class=\"lead\">Active repositories</p>"
             f"<ul class=\"repos\">{items}</ul>"
         )
@@ -581,8 +644,6 @@ def index():
     body += (
         "<hr>"
         "<p class=\"foot\">"
-        "<a href=\"/all_cards\">All Cards board</a>"
-        " &nbsp;&middot;&nbsp; "
         "<a href=\"/health\">Health</a>"
         "</p>"
     )
