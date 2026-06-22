@@ -4,6 +4,30 @@ All notable changes to the **agent-os** plugin are documented here. The format i
 based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/), and this project
 adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.2.4] - 2026-06-22
+
+### Fixed
+- **Graph server is reaped when its parent MCP server dies.** The Flask graph
+  server (`mcp/db_tools/app.py`) was spawned with no OS-level lifetime coupling,
+  and the only cleanup (`server.py`'s `atexit` handler) runs only on a clean
+  Python exit — so `SIGKILL`, default-disposition `SIGTERM`, a crash, or the
+  parent being force-reaped all orphaned the child on `:5000` (reparented to PID
+  1). On Linux the child is now coupled to its parent via
+  `prctl(PR_SET_PDEATHSIG, SIGTERM)` set in a `Popen` `preexec_fn`, with an
+  `os.getppid()` re-check to close the fork/parent-death race. It is attached
+  only when spawning from the main thread (`PR_SET_PDEATHSIG` keys off the
+  spawning *thread*, not the process), otherwise it falls back to the `atexit`
+  path. Non-Linux behavior is unchanged.
+- **Graph server can no longer hang on its own log output.** The child was
+  spawned with `stdout`/`stderr=PIPE` that the parent drained only *after* the
+  child exited; while it was alive the Werkzeug dev server's per-request stderr
+  logging would fill the ~64KB kernel pipe buffer and block the child
+  mid-session. Its output is now redirected to a per-port log file
+  (`~/.agent-os/graph_server-<port>.log`) — file writes never block — and crash
+  diagnostics are preserved by reading a bounded tail of that file post-exit
+  instead of `communicate()`. If the log file can't be opened, it falls back to
+  `DEVNULL` so the server still starts.
+
 ## [0.2.3] - 2026-06-21
 
 ### Added
