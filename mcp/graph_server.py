@@ -5,10 +5,13 @@ Handles starting/stopping the graph UI subprocess, port collision avoidance,
 and repo registration for the multi-repo graph URL scheme.
 """
 
+import ctypes
 import json
 import os
+import signal
 import subprocess
 import sys
+import threading
 from pathlib import Path
 from typing import Optional
 
@@ -90,8 +93,68 @@ def _probe_health(port: int, timeout: float = 2.0) -> bool:
             conn.close()
 
 
+# PR_SET_PDEATHSIG: prctl option that asks the kernel to deliver a signal to
+# THIS (calling) process when its parent dies. Value is stable across Linux
+# (since 2.1.57; see `man 2 prctl` / <linux/prctl.h>).
+_PR_SET_PDEATHSIG = 1
+
+
+def _make_pdeathsig_preexec(parent_pid: int):
+    """Build a preexec_fn that couples the child's lifetime to ``parent_pid`` (Linux only).
+
+    The returned callable runs in the child after fork() but before exec(). It:
+      1. Best-effort asks the kernel (PR_SET_PDEATHSIG) to SIGTERM this process
+         when its parent — the spawning MCP server — dies by ANY means (SIGTERM,
+         SIGKILL, crash, force-reap). This reaps the orphaned :5000 graph server
+         instead of leaving it reparented to PID 1 (the failure mode this fixes).
+      2. Re-checks os.getppid(): if the real parent already died in the tiny
+         window between fork() and prctl(), we have been reparented to init, so
+         the pdeathsig would fire against the wrong parent and never arrive —
+         exit immediately to avoid an orphan (closes the fork/parent-death race).
+
+    The prctl call is wrapped defensively so an unexpected libc/ctypes failure
+    cannot abort the whole spawn; the getppid race-check still runs regardless.
+
+    IMPORTANT: PR_SET_PDEATHSIG is attached to the spawning *thread*, not the
+    whole process — the signal fires when the thread that called fork() exits,
+    even if the process lives on. The caller MUST therefore spawn from a thread
+    that lives for the full process lifetime (the main thread). `_spawn_graph_server`
+    enforces this with a main-thread guard; do NOT call this from a transient
+    worker thread (e.g. one created by ``anyio.to_thread.run_sync``), or the
+    worker's exit would prematurely SIGTERM the live graph server mid-session.
+    """
+    def _preexec() -> None:
+        try:
+            libc = ctypes.CDLL("libc.so.6", use_errno=True)
+            libc.prctl(_PR_SET_PDEATHSIG, signal.SIGTERM)
+        except Exception:
+            # Best effort: if prctl is unavailable we fall back to the existing
+            # atexit-based cleanup path. Do not crash the child's launch.
+            pass
+        # Race guard: parent may have died between fork() and prctl() above.
+        if os.getppid() != parent_pid:
+            os._exit(0)
+    return _preexec
+
+
 def _spawn_graph_server(app_path: Path, repo_root: Path, port: int) -> "subprocess.Popen[str]":
-    """Launch the Flask graph server subprocess and return the Popen handle."""
+    """Launch the Flask graph server subprocess and return the Popen handle.
+
+    On Linux the child is coupled to this process via PR_SET_PDEATHSIG so the
+    graph server dies with the MCP server that owns it (no orphaned :5000
+    processes). On non-Linux platforms ``preexec_fn`` is not attached and we keep
+    relying on the existing atexit cleanup path — behavior is unchanged there.
+
+    The pdeathsig coupling is attached only when we are on the main thread,
+    because PR_SET_PDEATHSIG keys off the spawning thread's lifetime (see
+    _make_pdeathsig_preexec). Spawning from a transient worker thread would make
+    that thread's exit kill a healthy graph server, so we fall back to the
+    atexit path in that case rather than risk a premature kill.
+    """
+    parent_pid = os.getpid()
+    on_main_thread = threading.current_thread() is threading.main_thread()
+    use_pdeathsig = sys.platform == "linux" and on_main_thread
+    preexec = _make_pdeathsig_preexec(parent_pid) if use_pdeathsig else None
     proc = subprocess.Popen(
         [sys.executable, str(app_path)],
         cwd=repo_root,
@@ -100,6 +163,7 @@ def _spawn_graph_server(app_path: Path, repo_root: Path, port: int) -> "subproce
         text=True,
         bufsize=1,
         env={**os.environ, "PORT": str(port)},
+        preexec_fn=preexec,
     )
     log(f"Graph server started (PID: {proc.pid}) at {app_path}")
     return proc
