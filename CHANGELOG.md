@@ -4,6 +4,36 @@ All notable changes to the **agent-os** plugin are documented here. The format i
 based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/), and this project
 adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.2.7] - 2026-06-22
+
+### Fixed
+- **Card database is now protected from git-driven loss.** The live SQLite card
+  store (`.agent-os/cards.sqlite`) lives in the working tree, and nothing made
+  git ignore it while the docs said it was "safe to commit". In projects where
+  the DB was committed, a `git reset --hard`, checkout, or rebase would rewind
+  `cards.sqlite` to an older snapshot — silently dropping every card created
+  after that commit. The plugin now drops a self-protecting `.agent-os/.gitignore`
+  (single wildcard `*`) the first time either the MCP server (`ensure_agent_os()`,
+  before any card can be created) or a hook (`state_dir()`) initialises
+  `.agent-os/`, so git never tracks the DB. The write is idempotent (never
+  clobbers an existing `.gitignore`) and best-effort (any `OSError` is swallowed,
+  never breaking card or hook flows). `mcp/setup-mcp.sh` also creates it at setup.
+  The plugin's lifecycle hooks were exonerated — they only *detect* git-state
+  changes; they run no destructive git commands and never delete cards.
+
+### Changed
+- **Docs no longer advise committing the live card DB.** `CLAUDE.md` and
+  `hooks/README.md` now explain that `.agent-os/` is auto-ignored, that committing
+  the live SQLite file risks losing cards on `git reset`/checkout/rebase, and that
+  `git clean -fdx` (the `-x` flag deletes ignored files) still removes
+  `.agent-os/` — use `git clean -fd` or `-e .agent-os` to preserve it. Projects
+  whose DB is already committed need a one-time `git rm -r --cached .agent-os/`.
+
+### Added
+- **`mcp/tests/test_gitignore_protection.py`** — covers the `.gitignore`
+  helper's creation, idempotency, `OSError` swallowing, and invocation from both
+  the server (`ensure_agent_os()`) and hook (`state_dir()`) chokepoints.
+
 ## [0.2.6] - 2026-06-22
 
 ### Added

@@ -30,8 +30,21 @@ cat > "$MCP_FILE" << EOF
 }
 EOF
 
+# Protect the card database from accidental git tracking.
+# .agent-os/.gitignore contains a single wildcard so git ignores everything
+# under .agent-os/ regardless of the project's root .gitignore.
+AGENT_OS_DIR="$GIT_ROOT/.agent-os"
+AGENT_OS_GITIGNORE="$AGENT_OS_DIR/.gitignore"
+mkdir -p "$AGENT_OS_DIR"
+if [ ! -f "$AGENT_OS_GITIGNORE" ]; then
+    printf '*\n' > "$AGENT_OS_GITIGNORE"
+fi
+
 echo "✓ Task-cards MCP server configured in $GIT_ROOT"
 echo "  Cards will be stored in: $GIT_ROOT/.agent-os/cards.sqlite"
+echo "  The .agent-os/ directory is git-ignored by default (do NOT commit the live card DB)."
+echo "  Committing cards.sqlite risks losing cards on git reset/checkout/rebase."
+echo "  To share cards with teammates, use export — not a git commit."
 echo ""
 echo "Next steps:"
 echo "  1. Restart Claude Code in this directory"

@@ -1,6 +1,6 @@
 # Agent OS
 
-A repository-local "operating system" for agentic development in Claude Code, packaged as a Claude Code plugin (version `0.2.6`). It bundles task tracking, code/database knowledge graphs, lifecycle hooks, and a delegation-oriented set of agents and skills.
+A repository-local "operating system" for agentic development in Claude Code, packaged as a Claude Code plugin (version `0.2.7`). It bundles task tracking, code/database knowledge graphs, lifecycle hooks, and a delegation-oriented set of agents and skills.
 
 ## What's in the plugin
 
