@@ -57,6 +57,22 @@ db_path: Optional[Path] = None
 VALID_STATUSES = ("Created", "In Progress", "Complete")
 
 
+def _ensure_agent_os_gitignore(agent_os_dir: Path) -> None:
+    """Create .agent-os/.gitignore with a wildcard if it does not already exist.
+
+    The wildcard makes git ignore everything under .agent-os/ (cards.sqlite,
+    db/, hooks/) regardless of the project's root .gitignore.  Write is
+    idempotent: an existing file is never overwritten.  Any OS error is
+    swallowed so protection is best-effort and never breaks card operations.
+    """
+    try:
+        gitignore_path = agent_os_dir / ".gitignore"
+        if not gitignore_path.exists():
+            gitignore_path.write_text("*\n", encoding="utf-8")
+    except OSError:
+        pass
+
+
 def ensure_agent_os():
     """Ensure the .agent-os directory and card database schema exist.
 
@@ -85,6 +101,7 @@ def ensure_agent_os():
 
         agent_os_dir = repo_root / ".agent-os"
         agent_os_dir.mkdir(exist_ok=True)
+        _ensure_agent_os_gitignore(agent_os_dir)
         log(f"Agent OS directory: {agent_os_dir}")
 
         db_path = agent_os_dir / "cards.sqlite"

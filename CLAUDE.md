@@ -182,4 +182,4 @@ Future features (not in scope yet):
 - Cards are repository-local; each repo has its own database
 - The MCP server auto-initializes the database on first connection
 - The card subsystem requires no external services; the optional database-graph subsystem does (`pyodbc` + a live SQL Server)
-- Safe to commit `.agent-os/` to version control (or use `.gitignore`)
+- `.agent-os/` is auto-ignored by git: the plugin drops a self-protecting `.agent-os/.gitignore` (wildcard `*`) on first init, so `cards.sqlite` is never tracked. Do NOT commit the live SQLite file — committing it risks silently losing cards when `git reset --hard`, checkout, or rebase reverts the DB to an older snapshot. To share cards with teammates, use export rather than committing the live database. Note that `git clean -fdx` (the `-x` flag deletes ignored files) will still remove the ignored `.agent-os/` directory and its card DB — use `git clean -fd` without `-x`, or `-e .agent-os`, to preserve it.

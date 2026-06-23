@@ -88,10 +88,31 @@ The plugin writes only project-local transient state:
 └── hooks.log
 ```
 
-Recommended `.gitignore` entry:
+The plugin automatically drops a self-protecting `.agent-os/.gitignore` with a
+single wildcard (`*`) the first time either the MCP server or a hook initialises
+`.agent-os/`. This means git ignores `cards.sqlite`, `hooks/`, `db/`, and
+everything else under `.agent-os/` automatically, without requiring a manual
+`.gitignore` entry in the project root.
+
+If you have already committed `.agent-os/` contents, remove them from tracking
+with:
+
+```bash
+git rm -r --cached .agent-os/
+```
+
+**Caveat — `git clean -x`:** because `.agent-os/` is git-ignored, `git clean
+-fdx` (the `-x` flag also deletes ignored files) will remove the entire
+`.agent-os/` directory, including `cards.sqlite`. Use `git clean -fd` (without
+`-x`), or run `git clean` with an exclude such as `-e .agent-os`, to avoid
+deleting your card database. There is no recovery for an untracked DB removed
+this way, so keep a backup if you rely on `clean -x`.
+
+For reference, the equivalent manual root `.gitignore` entry (now created
+automatically) is:
 
 ```gitignore
-.agent-os/hooks/
+.agent-os/
 ```
 
 ## Validation

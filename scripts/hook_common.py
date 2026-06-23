@@ -66,9 +66,26 @@ def is_relevant_source(rel: Path) -> bool:
         return False
     return rel.suffix.lower() in SOURCE_EXTENSIONS
 
+def _ensure_agent_os_gitignore(agent_os_dir: Path) -> None:
+    """Create .agent-os/.gitignore with a wildcard if it does not already exist.
+
+    The wildcard makes git ignore everything under .agent-os/ (cards.sqlite,
+    db/, hooks/) regardless of the project's root .gitignore.  Write is
+    idempotent: an existing file is never overwritten.  Any OS error is
+    swallowed so protection is best-effort and never breaks hook operations.
+    """
+    try:
+        gitignore_path = agent_os_dir / ".gitignore"
+        if not gitignore_path.exists():
+            gitignore_path.write_text("*\n", encoding="utf-8")
+    except OSError:
+        pass
+
+
 def state_dir(root: Path) -> Path:
     path = root / ".agent-os" / "hooks"
     path.mkdir(parents=True, exist_ok=True)
+    _ensure_agent_os_gitignore(root / ".agent-os")
     return path
 
 def dirty_path(root: Path) -> Path:
