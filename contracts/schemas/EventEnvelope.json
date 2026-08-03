@@ -1,0 +1,106 @@
+{
+  "description": "A single Agent OS event (proposal \u00a710.2).\n\nRequired header: ``event_id`` (``evt_`` ULID), ``event_type``,\n``occurred_at`` (UTC), and ``machine_id`` (every event originates on a\nmachine).  The remaining context fields are nullable because not every event\nis scoped to an agent, session, project, repository, or task.",
+  "properties": {
+    "agent_id": {
+      "anyOf": [
+        {
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Agent Id"
+    },
+    "event_id": {
+      "description": "Prefixed ULID, e.g. evt_01J...",
+      "title": "Event Id",
+      "type": "string"
+    },
+    "event_type": {
+      "description": "Open dot-namespaced event type (e.g. 'task.completed'). Producers SHOULD use a value from the EventType registry; consumers accept any well-formed domain.verb string so unknown types stay routable.",
+      "pattern": "^[a-z][a-z0-9_]*(\\.[a-z][a-z0-9_]*)+$",
+      "title": "Event Type",
+      "type": "string"
+    },
+    "machine_id": {
+      "description": "Originating machine id (mach_...).",
+      "title": "Machine Id",
+      "type": "string"
+    },
+    "occurred_at": {
+      "description": "When the event occurred (timezone-aware UTC ISO-8601).",
+      "format": "date-time",
+      "title": "Occurred At",
+      "type": "string"
+    },
+    "payload": {
+      "additionalProperties": true,
+      "description": "Event-type-specific body; opaque to the envelope.",
+      "title": "Payload",
+      "type": "object"
+    },
+    "project_id": {
+      "anyOf": [
+        {
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Project Id"
+    },
+    "repository_id": {
+      "anyOf": [
+        {
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Repository Id"
+    },
+    "schema_version": {
+      "default": 1,
+      "title": "Schema Version",
+      "type": "integer"
+    },
+    "session_id": {
+      "anyOf": [
+        {
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Session Id"
+    },
+    "task_id": {
+      "anyOf": [
+        {
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Task Id"
+    }
+  },
+  "required": [
+    "event_id",
+    "event_type",
+    "occurred_at",
+    "machine_id"
+  ],
+  "title": "EventEnvelope",
+  "type": "object"
+}

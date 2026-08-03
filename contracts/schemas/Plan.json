@@ -1,0 +1,55 @@
+{
+  "description": "An ordered plan of steps for a task (proposal \u00a711.1).",
+  "properties": {
+    "artifact_id": {
+      "title": "Artifact Id",
+      "type": "string"
+    },
+    "artifact_type": {
+      "const": "plan",
+      "default": "plan",
+      "title": "Artifact Type",
+      "type": "string"
+    },
+    "author_agent": {
+      "title": "Author Agent",
+      "type": "string"
+    },
+    "schema_version": {
+      "default": 1,
+      "title": "Schema Version",
+      "type": "integer"
+    },
+    "steps": {
+      "items": {
+        "type": "string"
+      },
+      "title": "Steps",
+      "type": "array"
+    },
+    "summary": {
+      "title": "Summary",
+      "type": "string"
+    },
+    "task_id": {
+      "anyOf": [
+        {
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "description": "Linked canonical task id (task_...), if any.",
+      "title": "Task Id"
+    }
+  },
+  "required": [
+    "artifact_id",
+    "author_agent",
+    "summary"
+  ],
+  "title": "Plan",
+  "type": "object"
+}

@@ -1,0 +1,168 @@
+{
+  "$defs": {
+    "TaskSyncStatus": {
+      "description": "Task status as carried across the sync boundary.\n\nMirrors the local card lifecycle (Created -> In Progress -> Complete) plus an\nexplicit ``blocked`` state that the distributed system needs to route around.",
+      "enum": [
+        "created",
+        "in_progress",
+        "blocked",
+        "complete"
+      ],
+      "title": "TaskSyncStatus",
+      "type": "string"
+    }
+  },
+  "description": "A task's synchronizable identity + concurrency metadata (proposal \u00a714).\n\n``global_id`` is the central canonical identity (``task_`` ULID);\n``local_card_id`` is the existing short repository card id (e.g. ``ab12cd34``)\nand is nullable because a centrally-created task may not yet have a local\nprojection.",
+  "properties": {
+    "blocked_reason": {
+      "anyOf": [
+        {
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "description": "Why the task is blocked, when status is blocked (\u00a714.1).",
+      "title": "Blocked Reason"
+    },
+    "description": {
+      "anyOf": [
+        {
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Description"
+    },
+    "global_id": {
+      "description": "Central canonical task id (task_...).",
+      "title": "Global Id",
+      "type": "string"
+    },
+    "last_status_event_id": {
+      "anyOf": [
+        {
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "description": "Reference to the immutable status-history event (evt_...).",
+      "title": "Last Status Event Id"
+    },
+    "local_card_id": {
+      "anyOf": [
+        {
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "description": "Repository-local short card id, e.g. 'ab12cd34' (None until projected).",
+      "title": "Local Card Id"
+    },
+    "originating_client": {
+      "description": "Id of the client/machine that produced this version.",
+      "title": "Originating Client",
+      "type": "string"
+    },
+    "priority": {
+      "anyOf": [
+        {
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Priority"
+    },
+    "project_id": {
+      "anyOf": [
+        {
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Project Id"
+    },
+    "repository_id": {
+      "anyOf": [
+        {
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Repository Id"
+    },
+    "schema_version": {
+      "default": 1,
+      "title": "Schema Version",
+      "type": "integer"
+    },
+    "status": {
+      "$ref": "#/$defs/TaskSyncStatus",
+      "default": "created"
+    },
+    "status_reason": {
+      "anyOf": [
+        {
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "description": "Why the task is in its current status (\u00a714.1).",
+      "title": "Status Reason"
+    },
+    "title": {
+      "anyOf": [
+        {
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Title"
+    },
+    "updated_at": {
+      "format": "date-time",
+      "title": "Updated At",
+      "type": "string"
+    },
+    "version": {
+      "default": 1,
+      "description": "Monotonic version for optimistic concurrency.",
+      "minimum": 1,
+      "title": "Version",
+      "type": "integer"
+    }
+  },
+  "required": [
+    "global_id",
+    "updated_at",
+    "originating_client"
+  ],
+  "title": "TaskRecord",
+  "type": "object"
+}

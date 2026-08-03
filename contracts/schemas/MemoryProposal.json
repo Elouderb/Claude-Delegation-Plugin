@@ -1,0 +1,95 @@
+{
+  "description": "A proposal to record/promote a memory (proposal \u00a711.1 / \u00a75.3 / \u00a79.7).\n\nDurable proposal object: carries a registered ``prop_`` id (so it is not an\n:class:`ArtifactBase`, which uses a free-form ``artifact_id``).\n``target_scope`` says whether the proposal is for project or global memory;\n``claim`` + ``evidence`` + ``confidence`` justify it; curator/consolidation\nlogic (later phases) decides acceptance.",
+  "properties": {
+    "artifact_type": {
+      "const": "memory_proposal",
+      "default": "memory_proposal",
+      "title": "Artifact Type",
+      "type": "string"
+    },
+    "author_agent": {
+      "title": "Author Agent",
+      "type": "string"
+    },
+    "claim": {
+      "title": "Claim",
+      "type": "string"
+    },
+    "confidence": {
+      "maximum": 1.0,
+      "minimum": 0.0,
+      "title": "Confidence",
+      "type": "number"
+    },
+    "created_at": {
+      "format": "date-time",
+      "title": "Created At",
+      "type": "string"
+    },
+    "evidence": {
+      "items": {
+        "type": "string"
+      },
+      "title": "Evidence",
+      "type": "array"
+    },
+    "node_type": {
+      "description": "Proposed memory node type.",
+      "title": "Node Type",
+      "type": "string"
+    },
+    "proposal_id": {
+      "description": "Prefixed ULID for the proposal (prop_...).",
+      "title": "Proposal Id",
+      "type": "string"
+    },
+    "reason": {
+      "anyOf": [
+        {
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Reason"
+    },
+    "schema_version": {
+      "default": 1,
+      "title": "Schema Version",
+      "type": "integer"
+    },
+    "target_scope": {
+      "default": "project",
+      "enum": [
+        "project",
+        "global"
+      ],
+      "title": "Target Scope",
+      "type": "string"
+    },
+    "task_id": {
+      "anyOf": [
+        {
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Task Id"
+    }
+  },
+  "required": [
+    "proposal_id",
+    "author_agent",
+    "node_type",
+    "claim",
+    "confidence",
+    "created_at"
+  ],
+  "title": "MemoryProposal",
+  "type": "object"
+}

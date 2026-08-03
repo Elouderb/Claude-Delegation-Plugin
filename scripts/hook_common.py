@@ -70,22 +70,39 @@ PLUGIN_GENERATED_FILES = (
     "hooks/hooks.json",
 )
 
+# Whole directories of generated-and-committed artifacts inside the plugin's OWN
+# repo. contracts/schemas/*.json are generated from the pydantic models by
+# `python -m contracts.generate_schemas`; hand-editing one would only be caught
+# later by the drift test, so block it at edit time and point the editor at the
+# models + generator instead. A consuming project has no contracts/schemas/, so
+# (like PLUGIN_GENERATED_FILES) this is gated on being the plugin repo.
+PLUGIN_GENERATED_PREFIXES = (
+    "contracts/schemas/",
+)
+
 def _is_plugin_repo(root: Path) -> bool:
     """True when ``root`` is the agent-os plugin's own repo — detected by the
     presence of the config template the installer generates .mcp.json from."""
     return (root / "templates" / "mcp.json.tmpl").is_file()
 
 def is_generated_in_repo(rel: Path, root: Path) -> bool:
-    """``is_generated`` plus the plugin-only generated launcher config.
+    """``is_generated`` plus the plugin-only generated launcher config + schemas.
 
     Inside the plugin's own repo, ``.mcp.json`` and ``hooks/hooks.json`` are
-    generated from ``templates/`` by the installer, so hand-edits should be
-    blocked (edit the template / generator instead). In a consuming repo those
-    files may be authored by hand, so they are NOT protected there.
+    generated from ``templates/`` by the installer, and ``contracts/schemas/*``
+    is generated from the pydantic models by ``contracts.generate_schemas``, so
+    hand-edits should be blocked (edit the source / generator instead). In a
+    consuming repo those files may be authored by hand (or do not exist), so they
+    are NOT protected there.
     """
     if is_generated(rel):
         return True
-    if rel.as_posix() in PLUGIN_GENERATED_FILES and _is_plugin_repo(root):
+    if not _is_plugin_repo(root):
+        return False
+    value = rel.as_posix()
+    if value in PLUGIN_GENERATED_FILES:
+        return True
+    if any(value.startswith(prefix) for prefix in PLUGIN_GENERATED_PREFIXES):
         return True
     return False
 

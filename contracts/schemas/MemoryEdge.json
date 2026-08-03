@@ -1,0 +1,91 @@
+{
+  "$defs": {
+    "MemoryEdgeType": {
+      "description": "Typed relationships between memory nodes (proposal \u00a79.4).",
+      "enum": [
+        "IMPLEMENTS",
+        "DEPENDS_ON",
+        "OWNS",
+        "DECIDED_BY",
+        "SUPERSEDES",
+        "CONTRADICTS",
+        "SUPPORTED_BY",
+        "DERIVED_FROM",
+        "APPLIES_TO",
+        "BLOCKS",
+        "RESOLVES",
+        "RELATED_TO",
+        "MENTIONS",
+        "USES",
+        "CONNECTS_TO",
+        "PROMOTED_FROM",
+        "IMPORTED_FROM_GLOBAL"
+      ],
+      "title": "MemoryEdgeType",
+      "type": "string"
+    }
+  },
+  "description": "A typed edge between two memory nodes (proposal \u00a74.5 / \u00a79.4).",
+  "properties": {
+    "confidence": {
+      "anyOf": [
+        {
+          "maximum": 1.0,
+          "minimum": 0.0,
+          "type": "number"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Confidence"
+    },
+    "edge_id": {
+      "description": "Prefixed ULID for the edge (mem_...).",
+      "title": "Edge Id",
+      "type": "string"
+    },
+    "edge_type": {
+      "$ref": "#/$defs/MemoryEdgeType"
+    },
+    "metadata": {
+      "additionalProperties": true,
+      "title": "Metadata",
+      "type": "object"
+    },
+    "schema_version": {
+      "default": 1,
+      "title": "Schema Version",
+      "type": "integer"
+    },
+    "source_node_id": {
+      "title": "Source Node Id",
+      "type": "string"
+    },
+    "target_node_id": {
+      "title": "Target Node Id",
+      "type": "string"
+    },
+    "weight": {
+      "anyOf": [
+        {
+          "type": "number"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Weight"
+    }
+  },
+  "required": [
+    "edge_id",
+    "source_node_id",
+    "target_node_id",
+    "edge_type"
+  ],
+  "title": "MemoryEdge",
+  "type": "object"
+}

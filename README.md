@@ -10,6 +10,7 @@ A repository-local "operating system" for agentic development in Claude Code, pa
 | **Graph query tools** | `mcp/server.py` | 18 read-oriented MCP tools over the Graphify code graph and the database graph. |
 | **Central memory tools** | `mcp/memory_tools.py` | 3 optional tools (`memory_ingest`, `memory_query`, `memory_status`) over a machine-global sqlite-vec + FTS5 corpus. Degrades gracefully when its extras are absent (see below). |
 | **Database graph builder** | `mcp/db_tools/` | Builds a graph of a Microsoft SQL Server schema (`build_db_graph.py` + `build_graph_html.py`). Optional; requires a SQL Server connection. |
+| **Architecture contracts** | `contracts/` | Phase 0 typed contract models (pydantic v2) for events, agents, tasks/sync, memory, capabilities, and context, plus stable machine/repo identity and committed JSON Schemas (`contracts/schemas/*.json`). See [`docs/architecture/CONTRACTS.md`](docs/architecture/CONTRACTS.md). |
 | **Graph-sync hooks** | `hooks/hooks.json`, `scripts/` | Keep the repository graph fresh and protect generated files. See `hooks/README.md`. |
 | **Agents** | `agents/` | `implementer`, `complex-implementer` (opus / high-effort, for repo-wide or complex changes), `frontend-engineer` (UI), `codebase-consultant` (read-only repo investigator other agents can delegate to), `code-reviewer`, `security-reviewer`, `test-engineer`, `verification-engineer` (runs the real app / browser), `database-engineer`, `research-planner`. |
 | **Skills** | `skills/` | 24 workflow skills for cards, planning, review, testing, codebase investigation, verification, and graph discipline. |
@@ -184,6 +185,21 @@ Cards are repository-local: each repo gets its own `.agent-os/cards.sqlite`, dis
 - `INTEGRATION.md` — project setup and workflow rules.
 - `hooks/README.md` — how the graph-sync hooks behave.
 - `CHANGELOG.md` — change history.
+
+### Architecture / where the plan lives
+
+The long-term buildout of Agent OS into a distributed control/execution system
+is described in [`docs/architecture/PROPOSAL.md`](docs/architecture/PROPOSAL.md)
+(moved from the repo root). Phase 0 ships stable, typed **contracts** — pydantic
+v2 models plus committed JSON Schemas — in the top-level `contracts/` package:
+
+- [`docs/architecture/CONTRACTS.md`](docs/architecture/CONTRACTS.md) — contract
+  models, prefixed-ULID identifiers, identity files, capability/versioning rules.
+- [`docs/architecture/EVENTS.md`](docs/architecture/EVENTS.md) — the event
+  envelope and taxonomy, and the CloudEvents mapping decision.
+
+Run `python -m contracts.examples` to print one valid example payload per model,
+or `python -m contracts.generate_schemas --check` to verify the committed schemas.
 
 ## Testing
 

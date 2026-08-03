@@ -1,0 +1,62 @@
+{
+  "description": "A raw observation an agent offers toward memory (proposal \u00a711.1 / \u00a718.4).\n\nExecution agents *observe*; they do not commit memory directly.  An\nobservation is the pre-curation input to the memory pipeline (\u00a79.6).",
+  "properties": {
+    "artifact_id": {
+      "title": "Artifact Id",
+      "type": "string"
+    },
+    "artifact_type": {
+      "const": "memory_observation",
+      "default": "memory_observation",
+      "title": "Artifact Type",
+      "type": "string"
+    },
+    "author_agent": {
+      "title": "Author Agent",
+      "type": "string"
+    },
+    "confidence": {
+      "default": 0.5,
+      "maximum": 1.0,
+      "minimum": 0.0,
+      "title": "Confidence",
+      "type": "number"
+    },
+    "evidence": {
+      "items": {
+        "type": "string"
+      },
+      "title": "Evidence",
+      "type": "array"
+    },
+    "observation": {
+      "title": "Observation",
+      "type": "string"
+    },
+    "schema_version": {
+      "default": 1,
+      "title": "Schema Version",
+      "type": "integer"
+    },
+    "task_id": {
+      "anyOf": [
+        {
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "description": "Linked canonical task id (task_...), if any.",
+      "title": "Task Id"
+    }
+  },
+  "required": [
+    "artifact_id",
+    "author_agent",
+    "observation"
+  ],
+  "title": "MemoryObservation",
+  "type": "object"
+}

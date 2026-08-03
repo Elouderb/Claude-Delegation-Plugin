@@ -11,6 +11,12 @@ mcp>=1.0,<2
 flask           # mcp/db_tools/app.py graph viewer
 python-dotenv   # app.py reads per-repo .env via dotenv_values()
 
+# Pydantic v2 is a DIRECT dependency of the contracts/ package (the Phase 0
+# typed contract models + JSON-Schema generation). It currently also arrives
+# transitively via `mcp`, but contracts/ imports it directly, so declare it
+# explicitly. Permissive pin: any pydantic v2.
+pydantic>=2,<3  # contracts/ typed contract models
+
 # Optional extras live in their own files so this core set stays minimal (mcp,
 # flask, python-dotenv) and the installers can select them:
 #   - database-graph tools (db_* / SQL Server schema graph):  mcp/db_requirements.txt

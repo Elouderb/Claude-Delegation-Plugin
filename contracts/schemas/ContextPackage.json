@@ -1,0 +1,96 @@
+{
+  "description": "A bounded, cited context package for a task (proposal \u00a75.6).",
+  "properties": {
+    "citations": {
+      "description": "Source references making the package traceable.",
+      "items": {
+        "type": "string"
+      },
+      "title": "Citations",
+      "type": "array"
+    },
+    "code_graph_nodes": {
+      "items": {},
+      "title": "Code Graph Nodes",
+      "type": "array"
+    },
+    "constraints": {
+      "items": {
+        "type": "string"
+      },
+      "title": "Constraints",
+      "type": "array"
+    },
+    "db_graph_nodes": {
+      "items": {},
+      "title": "Db Graph Nodes",
+      "type": "array"
+    },
+    "global_memories": {
+      "items": {},
+      "title": "Global Memories",
+      "type": "array"
+    },
+    "project_memories": {
+      "items": {},
+      "title": "Project Memories",
+      "type": "array"
+    },
+    "recent_events": {
+      "items": {},
+      "title": "Recent Events",
+      "type": "array"
+    },
+    "relevant_files": {
+      "items": {
+        "type": "string"
+      },
+      "title": "Relevant Files",
+      "type": "array"
+    },
+    "repo": {
+      "anyOf": [
+        {
+          "additionalProperties": true,
+          "type": "object"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "description": "Repository identity/summary.",
+      "title": "Repo"
+    },
+    "schema_version": {
+      "default": 1,
+      "title": "Schema Version",
+      "type": "integer"
+    },
+    "task": {
+      "anyOf": [
+        {
+          "additionalProperties": true,
+          "type": "object"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "description": "The active task card / task artifact.",
+      "title": "Task"
+    },
+    "token_budget": {
+      "description": "Hard ceiling on assembled context size, in tokens.",
+      "exclusiveMinimum": 0,
+      "title": "Token Budget",
+      "type": "integer"
+    }
+  },
+  "required": [
+    "token_budget"
+  ],
+  "title": "ContextPackage",
+  "type": "object"
+}

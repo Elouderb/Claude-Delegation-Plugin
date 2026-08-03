@@ -16,9 +16,15 @@ def main() -> int:
 
     rel = relative_to_root(path, root)
     if rel is not None and is_generated_in_repo(rel, root):
+        if rel.as_posix().startswith("contracts/schemas/"):
+            hint = (
+                "Edit the pydantic models in contracts/*.py and regenerate with "
+                "`python -m contracts.generate_schemas` instead."
+            )
+        else:
+            hint = "Modify the source or generator instead."
         print(
-            f"Blocked direct edit to generated artifact: {rel.as_posix()}. "
-            "Modify the source or generator instead.",
+            f"Blocked direct edit to generated artifact: {rel.as_posix()}. {hint}",
             file=sys.stderr,
         )
         return 2
