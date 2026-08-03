@@ -73,7 +73,7 @@ def _register_repo(repo_root: Path) -> str:
     slug = repo_root.name
     _REPO_REGISTRY.parent.mkdir(parents=True, exist_ok=True)
     try:
-        registry: dict = json.loads(_REPO_REGISTRY.read_text()) if _REPO_REGISTRY.exists() else {}
+        registry: dict = json.loads(_REPO_REGISTRY.read_text(encoding="utf-8")) if _REPO_REGISTRY.exists() else {}
     except Exception:
         registry = {}
 
@@ -83,7 +83,7 @@ def _register_repo(repo_root: Path) -> str:
 
     registry[slug] = str(repo_root)
     try:
-        _REPO_REGISTRY.write_text(json.dumps(registry, indent=2))
+        _REPO_REGISTRY.write_text(json.dumps(registry, indent=2), encoding="utf-8")
     except Exception:
         pass
     return slug
@@ -205,7 +205,7 @@ def _spawn_graph_server(app_path: Path, repo_root: Path, port: int) -> "subproce
     log_file = None
     try:
         log_path.parent.mkdir(parents=True, exist_ok=True)
-        log_file = open(log_path, "w")
+        log_file = open(log_path, "w", encoding="utf-8")
     except OSError as exc:
         log(f"WARNING: could not open graph server log {log_path} ({exc}); "
             f"discarding child output.")

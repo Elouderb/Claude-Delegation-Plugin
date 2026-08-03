@@ -30,7 +30,10 @@ def test_task_cards():
 
         # Initialize server
         server.ensure_agent_os()
-        print("✓ Database initialized\n")
+        # ASCII markers (not ✓/✗): a cp1252 console raises UnicodeEncodeError on
+        # the glyph, and here that would crash the failure handler itself,
+        # masking the real error (WINDOWS.md §4).
+        print("[OK] Database initialized\n")
 
         # Test: Create cards
         print("Test 1: Create cards")
@@ -110,11 +113,11 @@ def test_task_cards():
             result = server.list_cards(status=status)
             print(f"  {status}: {result['total']} cards")
 
-        print("\n✓ All tests passed!")
+        print("\n[OK] All tests passed!")
         return True
 
     except Exception as e:
-        print(f"\n✗ Test failed: {e}")
+        print(f"\n[FAIL] Test failed: {e}")
         import traceback
         traceback.print_exc()
         return False

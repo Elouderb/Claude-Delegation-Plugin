@@ -4,6 +4,7 @@ import hashlib
 import json
 import os
 import shlex
+import shutil
 import subprocess
 import sys
 import time
@@ -43,6 +44,7 @@ def git_root(start: str | Path | None = None) -> Path | None:
             check=True,
             capture_output=True,
             text=True,
+            encoding="utf-8",
             timeout=10,
         )
         return Path(result.stdout.strip()).resolve()
@@ -58,6 +60,34 @@ def relative_to_root(path: str | Path, root: Path) -> Path | None:
 def is_generated(rel: Path) -> bool:
     value = rel.as_posix()
     return any(value == p.rstrip("/") or value.startswith(p) for p in GENERATED_PREFIXES)
+
+# The launcher config the installer GENERATES from templates/ (see
+# scripts/generate_config.py). These are only generated artifacts inside the
+# plugin's OWN repo; in a consuming project a hand-written .mcp.json is
+# legitimate, so they must NOT be protected unconditionally.
+PLUGIN_GENERATED_FILES = (
+    ".mcp.json",
+    "hooks/hooks.json",
+)
+
+def _is_plugin_repo(root: Path) -> bool:
+    """True when ``root`` is the agent-os plugin's own repo — detected by the
+    presence of the config template the installer generates .mcp.json from."""
+    return (root / "templates" / "mcp.json.tmpl").is_file()
+
+def is_generated_in_repo(rel: Path, root: Path) -> bool:
+    """``is_generated`` plus the plugin-only generated launcher config.
+
+    Inside the plugin's own repo, ``.mcp.json`` and ``hooks/hooks.json`` are
+    generated from ``templates/`` by the installer, so hand-edits should be
+    blocked (edit the template / generator instead). In a consuming repo those
+    files may be authored by hand, so they are NOT protected there.
+    """
+    if is_generated(rel):
+        return True
+    if rel.as_posix() in PLUGIN_GENERATED_FILES and _is_plugin_repo(root):
+        return True
+    return False
 
 def is_relevant_source(rel: Path) -> bool:
     if is_generated(rel):
@@ -144,8 +174,58 @@ def git_state_changed(root: Path) -> bool:
         return bool(previous)
     return False
 
-def graphify_command(root: Path) -> list[str]:
-    executable = os.getenv("AGENT_OS_GRAPHIFY_EXECUTABLE", "graphify")
+def resolve_graphify() -> str:
+    """Resolve the ``graphify`` console script in a venv-safe, cross-platform way.
+
+    The plugin runs from an interpreter invoked by absolute path, so the venv's
+    ``Scripts/`` (Windows) / ``bin/`` (POSIX) directory is NOT on ``PATH`` — a
+    bare ``graphify`` fails to resolve there even when it is correctly installed
+    (WINDOWS.md §2). Resolution order:
+
+      1. ``AGENT_OS_GRAPHIFY_EXECUTABLE`` env override — used verbatim if set.
+      2. A console script beside ``sys.executable`` — ``graphify.exe`` then
+         ``graphify`` — so ``Scripts/graphify.exe`` and ``bin/graphify`` both
+         resolve without touching ``PATH``.
+      3. ``shutil.which('graphify')`` on ``PATH``.
+      4. Fall back to the bare name ``"graphify"`` so the caller's existing
+         ``FileNotFoundError`` handling surfaces a clear "not found" message.
+
+    Returns a command token (absolute path or bare name); never raises.
+    """
+    override = os.getenv("AGENT_OS_GRAPHIFY_EXECUTABLE")
+    if override:
+        return override
+
+    # Probe the interpreter's OWN directory first (raw, un-resolved). In a venv,
+    # sys.executable is .venv/bin/python — itself a symlink — and pip installs the
+    # ``graphify`` console script beside that symlink in .venv/bin. Calling
+    # ``.resolve()`` first follows the symlink OUT of the venv (e.g. to the
+    # pyenv/system bin the venv was built from), where the venv's graphify does
+    # NOT exist, so the beside-interpreter probe misses and falls through to a
+    # PATH lookup that also fails (WINDOWS.md §2; verified live on POSIX where
+    # .venv/bin/python -> pyenv). We still probe the resolved parent second, which
+    # covers a graphify installed beside the base interpreter (pyenv-installed, no
+    # venv shim). Raw wins on ties so the venv's own console script is preferred.
+    raw_dir = Path(sys.executable).parent
+    resolved_dir = Path(sys.executable).resolve().parent
+    probe_dirs = [raw_dir]
+    if resolved_dir != raw_dir:
+        probe_dirs.append(resolved_dir)
+    for exe_dir in probe_dirs:
+        for name in ("graphify.exe", "graphify"):
+            candidate = exe_dir / name
+            if candidate.exists():
+                return str(candidate)
+
+    found = shutil.which("graphify")
+    if found:
+        return found
+
+    return "graphify"
+
+
+def graphify_command() -> list[str]:
+    executable = resolve_graphify()
     # Baseline incremental, code-only update. The `update <path>` subcommand
     # rebuilds graph.json without an LLM key; the older `. --update` form fell
     # into the semantic-extraction path, which errors out with no API key and
@@ -175,11 +255,22 @@ def refresh_graphify(root: Path, reason: str, timeout: int = 160) -> tuple[bool,
             return True, "Graphify refresh already running"
 
     try:
+        # Force UTF-8 in the child (PYTHONIOENCODING) AND decode its pipes with
+        # errors="replace": on a cp1252 Windows console graphify would otherwise
+        # emit bytes the parent's strict UTF-8 decode rejects, turning a SUCCESSFUL
+        # run into a UnicodeDecodeError that is misreported as "Graphify update
+        # error" — leaving the dirty flag set so every subsequent hook re-fails
+        # (WINDOWS.md §2/§3). Degraded-but-non-fatal output is always preferable.
+        child_env = dict(os.environ)
+        child_env.setdefault("PYTHONIOENCODING", "utf-8")
         result = subprocess.run(
-            graphify_command(root),
+            graphify_command(),
             cwd=root,
             capture_output=True,
             text=True,
+            encoding="utf-8",
+            errors="replace",
+            env=child_env,
             timeout=timeout,
             check=False,
         )

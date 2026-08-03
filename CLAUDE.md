@@ -2,7 +2,7 @@
 
 Jira-style task management system for Claude Code and AI agents. Repository-local, SQLite-backed, built on the `mcp` Python package.
 
-> **Scope of this document:** this file documents the **task-cards MCP subsystem** (the 6 card tools, the SQLite schema, and the basic card workflow). It is one part of the larger **agent-os** plugin, which also ships the code/database knowledge-graph tools, lifecycle hooks, and a delegation-oriented set of agents and skills. For the full plugin overview and install, see [`README.md`](README.md); for the agent operating model and delegation rules, see [`templates/CLAUDE.md`](templates/CLAUDE.md).
+> **Scope of this document:** this file documents the **task-cards MCP subsystem** (the 6 card tools, the SQLite schema, and the basic card workflow), plus the **optional central memory subsystem** (the 3 `memory_*` tools) covered in its own section near the end. It is one part of the larger **agent-os** plugin, which also ships the code/database knowledge-graph tools, lifecycle hooks, and a delegation-oriented set of agents and skills. For the full plugin overview and install, see [`README.md`](README.md); for the agent operating model and delegation rules, see [`templates/CLAUDE.md`](templates/CLAUDE.md).
 
 ## What This Is
 
@@ -16,10 +16,24 @@ A lightweight task/card management system designed as an MCP server. It provides
 
 ## Installation
 
+Run the bootstrap installer for your platform. It creates a plugin-local `.venv`,
+installs the core dependencies, **generates** `.mcp.json` and `hooks/hooks.json`
+from the committed templates in `templates/` (substituting the venv interpreter's
+absolute path for `@@PYTHON@@`), and verifies the result with a real MCP handshake.
+
 ```bash
-# Install dependencies (core: mcp, flask, python-dotenv)
-pip install -r mcp/requirements.txt
+# POSIX (Linux/macOS):
+installer/install.sh              # add --with-db / --with-memory / --all-extras
+# Windows (PowerShell 5.1+):
+# powershell -ExecutionPolicy Bypass -File installer\install.ps1
 ```
+
+The generated `.mcp.json` / `hooks/hooks.json` are git-ignored (only templates are
+committed); on a fresh clone they are absent until the installer runs, which is
+safe — Claude Code simply registers no server and fires no hooks until then. See
+`README.md` and `WINDOWS.md` §5 for the full rationale. The core dependency set
+(`mcp`, `flask`, `python-dotenv`) can still be installed directly with
+`pip install -r mcp/requirements.txt` if you are wiring the server by hand.
 
 ## Usage
 
@@ -159,6 +173,48 @@ Claude completes card:
    status: Complete
 ```
 
+## Central Memory Subsystem (optional)
+
+Beyond cards, the server ships an **optional** central memory store (Phase 0):
+ingest → chunk → embed → retrieve over a machine-global corpus, exposed via three
+MCP tools. It is optional in exactly the way the SQL-Server database-graph
+subsystem is: importing it never pulls its heavy dependencies, the server starts
+and all card/graph tools keep working without them, and the `memory_*` tools
+return a clear "unavailable — install `mcp/memory_requirements.txt`" result
+instead of raising when the extras are absent.
+
+**Install extras:** `pip install -r mcp/memory_requirements.txt`
+(`sqlite-vec`, `pysqlite3-binary`, `sentence-transformers`). The embedding model
+`BAAI/bge-small-en-v1.5` (384-dim) downloads once and is then fully offline.
+`pysqlite3-binary` is required because many Python builds compile the stdlib
+`sqlite3` without loadable-extension support, which `sqlite-vec` needs.
+
+**Tools:**
+
+- `memory_ingest(path, source_type=None, published_at=None)` — ingest a file or
+  directory; auto-detects a ChatGPT `conversations.json` export vs. Markdown/text.
+  `source_type='news'` requires `published_at`. Content-hash dedup makes an
+  unchanged re-ingest a no-op and cleanly replaces a changed file's chunks.
+- `memory_query(query, top_k=8, source_type=None, date_from=None, date_to=None)`
+  — hybrid BM25 (FTS5) + vector kNN (sqlite-vec) fused with RRF (k=60), with
+  optional source-type and date-range filters.
+- `memory_status()` — availability, corpus stats by source type, embedding model,
+  and DB path/size.
+
+**Storage:** `~/.agent-os/central-memory/memory.sqlite` — machine-global, **not**
+repo-local (the corpus is inherently cross-repo). Tables (schema `user_version` 1):
+`documents`, `chunks` (`id INTEGER PRIMARY KEY` rowid alias, chunk ids
+`mem:<doc_id>:<seq>` as a `UNIQUE` key, embedding model + dim recorded per row), a
+`chunks_fts` FTS5 **external-content** index kept in lockstep by triggers, and a
+`chunks_vec` vec0 table keyed to `chunks.id`. `source_type` is validated in app
+code (no DB CHECK). Set `AGENT_OS_MEMORY_HOME` to relocate the store (the tests
+use this so they never touch your real home). Runs in WAL mode with the same
+per-operation connection discipline as the card DB.
+
+Out of scope for Phase 0 (later phases): graph edges, agent-writable nodes,
+reranker, decay ranking, consolidation, PDF ingestion, and automated news
+fetching.
+
 ## Extending
 
 Future features (not in scope yet):
@@ -173,7 +229,13 @@ Future features (not in scope yet):
 
 - `mcp/server.py` - Thin MCP entrypoint; tools live in `mcp/*_tools.py` modules
 - `mcp/requirements.txt` - Core dependencies (`mcp`, `flask`, `python-dotenv`)
-- `installer/install.sh` - Installation helper
+- `mcp/db_requirements.txt` - Optional database-graph extras (`pyodbc`, `networkx`, `pyvis`)
+- `mcp/memory_tools.py` + `mcp/memory/` - Optional central memory subsystem (see above)
+- `mcp/memory_requirements.txt` - Optional memory extras (`sqlite-vec`, `pysqlite3-binary`, `sentence-transformers`)
+- `templates/mcp.json.tmpl`, `templates/hooks.json.tmpl` - Committed launcher-config templates (interpreter = `@@PYTHON@@`)
+- `scripts/generate_config.py` - Generates `.mcp.json` + `hooks/hooks.json` from the templates
+- `installer/install.sh`, `installer/install.ps1` - Per-platform bootstrap installers (venv + deps + generate + verify)
+- `installer/verify_install.py` - MCP handshake verifier (`initialize` + `tools/list`, asserts 27 tools)
 - `CLAUDE.md` - This documentation
 - `.agent-os/cards.sqlite` - Repository-local database (created on first run)
 

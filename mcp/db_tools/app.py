@@ -1,7 +1,9 @@
 from __future__ import annotations
 
+import importlib.util
 import json
 import os
+import shutil
 import sqlite3
 import subprocess
 import sys
@@ -17,6 +19,53 @@ BUILD_SCRIPT = SCRIPT_DIR / "build_db_graph.py"
 VISUALIZE_SCRIPT = SCRIPT_DIR / "build_graph_html.py"
 
 _REGISTRY_FILE = Path.home() / ".agent-os" / "active_repos.json"
+
+
+def _resolve_graphify() -> str:
+    """Resolve the ``graphify`` console script in a venv-safe, cross-platform way.
+
+    A LOCAL copy of scripts/hook_common.resolve_graphify() / graph_io's helper:
+    this Flask server runs as a standalone process spawned by absolute
+    interpreter path and cannot import the mcp package (it lives under
+    db_tools/), so it duplicates the resolver rather than sharing it — mirroring
+    how refresh_db() already spawns ``sys.executable`` directly.
+
+    Order: ``AGENT_OS_GRAPHIFY_EXECUTABLE`` override -> ``graphify.exe`` /
+    ``graphify`` beside ``sys.executable`` (so a venv's ``Scripts/`` or ``bin/``
+    resolves without being on ``PATH``, WINDOWS.md §2) -> ``shutil.which`` ->
+    bare ``"graphify"`` (lets the existing FileNotFoundError handler report it).
+    """
+    override = os.getenv("AGENT_OS_GRAPHIFY_EXECUTABLE")
+    if override:
+        return override
+
+    # Probe the interpreter's OWN directory first (raw, un-resolved). In a venv,
+    # sys.executable is .venv/bin/python — itself a symlink — and pip installs the
+    # ``graphify`` console script beside that symlink in .venv/bin. Calling
+    # ``.resolve()`` first follows the symlink OUT of the venv (e.g. to the
+    # pyenv/system bin the venv was built from), where the venv's graphify does
+    # NOT exist, so the beside-interpreter probe misses and falls through to a
+    # PATH lookup that also fails (WINDOWS.md §2; verified live on POSIX where
+    # .venv/bin/python -> pyenv). We still probe the resolved parent second, which
+    # covers a graphify installed beside the base interpreter (pyenv-installed, no
+    # venv shim). Raw wins on ties so the venv's own console script is preferred.
+    raw_dir = Path(sys.executable).parent
+    resolved_dir = Path(sys.executable).resolve().parent
+    probe_dirs = [raw_dir]
+    if resolved_dir != raw_dir:
+        probe_dirs.append(resolved_dir)
+    for exe_dir in probe_dirs:
+        for name in ("graphify.exe", "graphify"):
+            candidate = exe_dir / name
+            if candidate.exists():
+                return str(candidate)
+
+    found = shutil.which("graphify")
+    if found:
+        return found
+
+    return "graphify"
+
 
 app = Flask(__name__)
 
@@ -185,7 +234,7 @@ def _load_registry() -> dict[str, str]:
     if not _REGISTRY_FILE.exists():
         return {}
     try:
-        data = json.loads(_REGISTRY_FILE.read_text())
+        data = json.loads(_REGISTRY_FILE.read_text(encoding="utf-8"))
         return {str(k): str(v) for k, v in data.items() if isinstance(k, str) and isinstance(v, str)}
     except Exception:
         return {}
@@ -1232,11 +1281,16 @@ def refresh_repo(slug: str):
     repo_root, _, _ = _paths(slug)
     if repo_root is None:
         return jsonify({"error": f"Repo '{slug}' not found"}), 404
+    # Force UTF-8 in the child and decode its pipes with errors="replace": a
+    # cp1252 Windows console would otherwise make a SUCCESSFUL graphify run raise
+    # UnicodeDecodeError here and 500 the endpoint (WINDOWS.md §2/§3).
+    child_env = dict(os.environ)
+    child_env.setdefault("PYTHONIOENCODING", "utf-8")
     try:
         result = subprocess.run(
-            ["graphify", "update", ".", "--force"],
-            cwd=repo_root, capture_output=True, text=True,
-            timeout=300, check=True,
+            [_resolve_graphify(), "update", ".", "--force"],
+            cwd=repo_root, capture_output=True, text=True, encoding="utf-8",
+            errors="replace", env=child_env, timeout=300, check=True,
         )
     except FileNotFoundError:
         return jsonify({"error": "graphify not found — install with: pip install graphifyy"}), 500
@@ -1266,17 +1320,30 @@ def refresh_db(slug: str):
     if not BUILD_SCRIPT.exists() or not VISUALIZE_SCRIPT.exists():
         return jsonify({"error": "build_db_graph.py or build_graph_html.py is missing"}), 500
 
-    env = {**os.environ, "DB_CONNECTION_STRING": db_conn_str}
+    # The visualize step (build_graph_html.py) needs pyvis, which moved to the
+    # opt-in database extra (mcp/db_requirements.txt). The CalledProcessError
+    # handler below deliberately SUPPRESSES the child's output (it may echo the DB
+    # credential), so a missing pyvis would otherwise fail as an invisible
+    # ModuleNotFoundError leaving the JSON and HTML out of sync. Guard it up front
+    # with a clear, actionable error instead.
+    if importlib.util.find_spec("pyvis") is None:
+        return jsonify({"error": "pyvis is not installed — install the database "
+                                 "extra: mcp/db_requirements.txt"}), 500
+
+    # Force UTF-8 in the children so their stdio/file writes are UTF-8 even on a
+    # cp1252 Windows console, and decode their pipes with errors="replace" so a
+    # stray byte never turns a successful build into a decode crash (WINDOWS.md §3).
+    env = {**os.environ, "DB_CONNECTION_STRING": db_conn_str, "PYTHONIOENCODING": "utf-8"}
     try:
         subprocess.run(
             [sys.executable, str(BUILD_SCRIPT)],
-            cwd=repo_root, capture_output=True, text=True,
-            timeout=120, check=True, env=env,
+            cwd=repo_root, capture_output=True, text=True, encoding="utf-8",
+            errors="replace", timeout=120, check=True, env=env,
         )
         subprocess.run(
             [sys.executable, str(VISUALIZE_SCRIPT)],
-            cwd=repo_root, capture_output=True, text=True,
-            timeout=120, check=True, env=env,
+            cwd=repo_root, capture_output=True, text=True, encoding="utf-8",
+            errors="replace", timeout=120, check=True, env=env,
         )
     except subprocess.TimeoutExpired:
         return jsonify({"error": "Database graph refresh timed out"}), 504

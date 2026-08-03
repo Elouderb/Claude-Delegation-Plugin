@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import argparse
 import json
-import shutil
 
 from hook_common import (
     dirty_path,
@@ -11,6 +10,7 @@ from hook_common import (
     mark_dirty,
     read_hook_input,
     refresh_graphify,
+    resolve_graphify,
 )
 
 def parse_args() -> argparse.Namespace:
@@ -56,9 +56,17 @@ def main() -> int:
 def emit_health(root, graph_report) -> None:
     cards = root / ".agent-os" / "cards.sqlite"
     db_graph = root / ".agent-os" / "db" / "db_graph.json"
+    # resolve_graphify() already did the venv-safe work: it probed the dirs beside
+    # sys.executable (raw and resolved) and PATH, and only returns the bare name
+    # "graphify" when nothing was found (WINDOWS.md §2). Derive availability from
+    # that single result rather than re-running which()/is_file() here — this hook
+    # fires on every SessionStart, so the extra filesystem/PATH probes were pure
+    # duplicated work.
+    resolved_graphify = resolve_graphify()
+    graphify_available = resolved_graphify != "graphify"
     context = (
         f"Agent OS status: repo={root}; "
-        f"graphify_available={shutil.which('graphify') is not None}; "
+        f"graphify_available={graphify_available}; "
         f"repo_graph_exists={graph_report.exists()}; "
         f"cards_db_exists={cards.exists()}; "
         f"db_graph_exists={db_graph.exists()}. "

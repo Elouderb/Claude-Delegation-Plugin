@@ -4,3 +4,16 @@
 # The production runtime only needs mcp/requirements.txt.
 pytest>=8.0
 pyyaml>=6.0   # used to validate .github/workflows/ci.yml locally
+
+# Lightweight subset of the OPTIONAL memory extras (mcp/memory_requirements.txt)
+# so the memory store's vec0 + FTS5 integration tests can run in CI with a
+# stubbed embedder. These are small pure/binary wheels; the heavy embedding
+# runtime (sentence-transformers / torch) is intentionally NOT installed here —
+# store/retrieval tests inject a deterministic recorded-vector stub instead.
+#
+# pysqlite3-binary only publishes Linux wheels, so it is Linux-only here to keep
+# `pip install -r dev-requirements.txt` working on macOS/Windows. Off Linux the
+# store integration tests skip cleanly (they gate on storage availability), the
+# same way the db_* tests skip without a SQL Server.
+sqlite-vec>=0.1.6
+pysqlite3-binary>=0.5.0 ; sys_platform == "linux"

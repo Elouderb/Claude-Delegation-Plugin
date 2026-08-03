@@ -33,7 +33,12 @@ class TestGraphifyCommand(unittest.TestCase):
             # Ensure overrides are absent
             os.environ.pop("AGENT_OS_GRAPHIFY_EXECUTABLE", None)
             os.environ.pop("AGENT_OS_GRAPHIFY_ARGS", None)
-            cmd = hook_common.graphify_command(Path("/fake/root"))
+            # Pin the resolver: resolve_graphify() is env-dependent (graphify may
+            # sit beside sys.executable on a dev box and resolve to an absolute
+            # path). Its own resolution order is covered by test_resolve_graphify;
+            # here we assert only the command assembly around it.
+            with patch.object(hook_common, "resolve_graphify", return_value="graphify"):
+                cmd = hook_common.graphify_command()
         self.assertEqual(cmd, ["graphify", "update", ".", "--force"])
 
     def test_custom_executable(self):
@@ -41,14 +46,14 @@ class TestGraphifyCommand(unittest.TestCase):
                                      "AGENT_OS_GRAPHIFY_ARGS": ""}, clear=False):
             # Remove ARGS to keep test isolated
             os.environ.pop("AGENT_OS_GRAPHIFY_ARGS", None)
-            cmd = hook_common.graphify_command(Path("/fake/root"))
+            cmd = hook_common.graphify_command()
         self.assertEqual(cmd[0], "my-graphify")
         self.assertEqual(cmd[1:], ["update", ".", "--force"])
 
     def test_extra_args_appended(self):
         with patch.dict(os.environ, {"AGENT_OS_GRAPHIFY_ARGS": "--backend ollama --model llama3",
                                      "AGENT_OS_GRAPHIFY_EXECUTABLE": "graphify"}, clear=False):
-            cmd = hook_common.graphify_command(Path("/fake/root"))
+            cmd = hook_common.graphify_command()
         self.assertIn("--backend", cmd)
         self.assertIn("ollama", cmd)
         self.assertIn("--model", cmd)
@@ -60,8 +65,39 @@ class TestGraphifyCommand(unittest.TestCase):
         env = {"AGENT_OS_GRAPHIFY_EXECUTABLE": "graphify"}
         with patch.dict(os.environ, env, clear=False):
             os.environ.pop("AGENT_OS_GRAPHIFY_ARGS", None)
-            cmd = hook_common.graphify_command(Path("/fake/root"))
+            cmd = hook_common.graphify_command()
         self.assertEqual(cmd, ["graphify", "update", ".", "--force"])
+
+
+class TestRefreshGraphifyChildDecode(unittest.TestCase):
+    """A graphify child emitting bytes invalid in UTF-8 must not crash the
+    parent's strict text-mode decode: errors='replace' + PYTHONIOENCODING keep it
+    degraded-not-fatal, so a SUCCESSFUL run is not misreported as an error and the
+    dirty flag is still cleared (WINDOWS.md §2/§3)."""
+
+    def _make_root(self):
+        import shutil
+        tmpdir = tempfile.mkdtemp(prefix="agent_os_hooktest_")
+        self.addCleanup(shutil.rmtree, tmpdir, True)
+        (Path(tmpdir) / ".agent-os" / "hooks").mkdir(parents=True)
+        return Path(tmpdir)
+
+    def test_invalid_utf8_child_output_is_not_fatal(self):
+        root = self._make_root()
+        # A REAL child that writes a lone 0xFF (invalid UTF-8) to BOTH pipes and
+        # exits 0. Under a strict decode this raises UnicodeDecodeError, which
+        # refresh_graphify would otherwise catch and misreport as an error — the
+        # exact WINDOWS.md §2/§3 failure (dirty flag never cleared, hooks re-fail
+        # forever). errors="replace" makes the successful run succeed cleanly.
+        prog = "import os,sys; os.write(1, b'\\xff\\xfe ok'); os.write(2, b'\\xff'); sys.exit(0)"
+        fake_cmd = [sys.executable, "-c", prog]
+        with patch.object(hook_common, "graphify_command", return_value=fake_cmd):
+            with patch.object(hook_common, "git_state_fingerprint", return_value="x"):
+                success, msg = hook_common.refresh_graphify(root, "decode-test")
+        self.assertTrue(success, msg)
+        self.assertIn("decode-test", msg)
+        # The dirty flag must be cleared on the clean success.
+        self.assertFalse((root / ".agent-os" / "hooks" / "graphify.dirty").exists())
 
 
 class TestRefreshGraphifyLockBehavior(unittest.TestCase):
@@ -87,7 +123,7 @@ class TestRefreshGraphifyLockBehavior(unittest.TestCase):
         root, tmpdir = self._make_root()
         # Pre-create dirty flag
         dirty = root / ".agent-os" / "hooks" / "graphify.dirty"
-        dirty.write_text("{}")
+        dirty.write_text("{}", encoding="utf-8")
         ok_result = self._make_completed_process(0, stdout="updated")
         with patch("subprocess.run", return_value=ok_result):
             with patch.object(hook_common, "git_state_fingerprint", return_value="abc123"):
@@ -102,7 +138,7 @@ class TestRefreshGraphifyLockBehavior(unittest.TestCase):
             with patch.object(hook_common, "git_state_fingerprint", return_value="deadbeef"):
                 hook_common.refresh_graphify(root, "test-reason")
         fp = root / ".agent-os" / "hooks" / "git-state.sha256"
-        self.assertEqual(fp.read_text().strip(), "deadbeef")
+        self.assertEqual(fp.read_text(encoding="utf-8").strip(), "deadbeef")
 
     def test_success_message_contains_reason(self):
         root, tmpdir = self._make_root()
@@ -153,7 +189,7 @@ class TestRefreshGraphifyLockBehavior(unittest.TestCase):
         """If a fresh lock file exists, refresh_graphify returns True immediately."""
         root, tmpdir = self._make_root()
         lock = root / ".agent-os" / "hooks" / "graphify.lock"
-        lock.write_text("running")
+        lock.write_text("running", encoding="utf-8")
         # Don't touch mtime so it's considered fresh (within timeout)
         mock_run = MagicMock()
         with patch("subprocess.run", mock_run):
@@ -166,7 +202,7 @@ class TestRefreshGraphifyLockBehavior(unittest.TestCase):
         """A lock file older than timeout+30 s is removed and the run proceeds."""
         root, tmpdir = self._make_root()
         lock = root / ".agent-os" / "hooks" / "graphify.lock"
-        lock.write_text("stale")
+        lock.write_text("stale", encoding="utf-8")
         # Set mtime to well in the past (200 s ago for timeout=160 → threshold=190 s)
         past = time.time() - 200
         os.utime(str(lock), (past, past))

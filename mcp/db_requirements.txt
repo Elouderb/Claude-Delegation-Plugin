@@ -1,0 +1,17 @@
+# Optional dependencies for the DATABASE-GRAPH subsystem (the db_* MCP tools and
+# mcp/db_tools/: build_db_graph.py + build_graph_html.py).  NOT required by the
+# core card tools or the code-graph tools -- the MCP server starts and every
+# other tool works without these; the db_* tools report the subsystem as
+# unavailable until they are present (and a live SQL Server + DB_CONNECTION_STRING
+# in .env are configured).
+#
+# Install with the plugin installer's database extra, or directly:
+#     pip install -r mcp/db_requirements.txt
+#
+# The graph web UI is unusable without pyvis: build_graph_html.py needs it to
+# render db_graph.html, and its absence produces the zero-byte page described in
+# WINDOWS.md Section 3.
+
+pyodbc>=5.0      # SQL Server connectivity (also needs the system ODBC driver, e.g. "ODBC Driver 18 for SQL Server")
+networkx>=3.0    # graph construction in build_db_graph.py
+pyvis>=0.3       # HTML visualization in build_graph_html.py

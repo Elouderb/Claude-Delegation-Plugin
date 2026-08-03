@@ -84,7 +84,7 @@ class TestPdeathsigReaping(unittest.TestCase):
         import tempfile
         self._tmp = tempfile.TemporaryDirectory(prefix="agent_os_pdeathsig_")
         self._sleeper = Path(self._tmp.name) / "sleeper.py"
-        self._sleeper.write_text(_SLEEPER_SRC)
+        self._sleeper.write_text(_SLEEPER_SRC, encoding="utf-8")
         self._parent: subprocess.Popen | None = None
         self._child_pid: int | None = None
 
@@ -110,6 +110,7 @@ class TestPdeathsigReaping(unittest.TestCase):
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
             text=True,
+            encoding="utf-8",
         )
 
         # Read the grandchild PID line the parent prints once it has spawned it.

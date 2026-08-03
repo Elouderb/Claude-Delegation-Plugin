@@ -77,6 +77,20 @@ def _info(msg: str) -> None:
     print(f"[smoke] {msg}", flush=True)
 
 
+def _venv_bin_dir(venv_dir: Path, os_name: str = os.name) -> Path:
+    """Return a venv's console-scripts directory: ``Scripts`` on Windows, ``bin``
+    on POSIX. Pure (``os_name``-parameterized) so path building is unit-testable
+    on either platform (WINDOWS.md §4)."""
+    return venv_dir / ("Scripts" if os_name == "nt" else "bin")
+
+
+def _venv_executable(venv_dir: Path, name: str, os_name: str = os.name) -> Path:
+    """Return the path to a venv console script, appending ``.exe`` on Windows
+    (``pip.exe`` / ``python.exe``). Pure and ``os_name``-parameterized."""
+    exe = f"{name}.exe" if os_name == "nt" else name
+    return _venv_bin_dir(venv_dir, os_name) / exe
+
+
 def _free_port() -> int:
     """Return a free TCP port on localhost."""
     with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
@@ -193,13 +207,13 @@ def main() -> None:
         _info(f"Creating venv at {venv_dir}")
         venv.create(str(venv_dir), with_pip=True)
 
-        pip = venv_dir / "bin" / "pip"
-        python = venv_dir / "bin" / "python"
+        pip = _venv_executable(venv_dir, "pip")
+        python = _venv_executable(venv_dir, "python")
 
         _info(f"Installing {REQUIREMENTS} ...")
         result = subprocess.run(
             [str(pip), "install", "-r", str(REQUIREMENTS), "-q"],
-            capture_output=True, text=True, timeout=180
+            capture_output=True, text=True, encoding="utf-8", timeout=180
         )
         if result.returncode != 0:
             _fail(
@@ -221,7 +235,7 @@ def main() -> None:
             # the host-level mcp package instead of the venv's copy.
             "PYTHONPATH": "",
             "VIRTUAL_ENV": str(venv_dir),
-            "PATH": str(venv_dir / "bin") + os.pathsep + os.environ.get("PATH", ""),
+            "PATH": str(_venv_bin_dir(venv_dir)) + os.pathsep + os.environ.get("PATH", ""),
         }
         mcp_proc = subprocess.Popen(
             [str(python), str(SERVER_PY)],
@@ -377,7 +391,7 @@ def main() -> None:
         card_result = subprocess.run(
             [str(python), "-c", card_test_script],
             cwd=str(work_dir),
-            capture_output=True, text=True, timeout=30,
+            capture_output=True, text=True, encoding="utf-8", timeout=30,
             env=card_env,
         )
         if card_result.returncode != 0:

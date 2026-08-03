@@ -51,7 +51,7 @@ def _load_fixture():
     matches what production code actually sees (edges/relationship/type aliases
     present).
     """
-    with open(_FIXTURE) as fh:
+    with open(_FIXTURE, encoding="utf-8") as fh:
         return graph_io._normalize_code_graph(json.load(fh))
 
 
@@ -83,8 +83,8 @@ class TestLoadCodeGraphPresent(unittest.TestCase):
         outdir.mkdir()
         # Write the RAW (un-normalized) graphify-format fixture to disk so the
         # real loader exercises the links->edges normalization path end to end.
-        with open(_FIXTURE) as fh:
-            (outdir / "graph.json").write_text(fh.read())
+        with open(_FIXTURE, encoding="utf-8") as fh:
+            (outdir / "graph.json").write_text(fh.read(), encoding="utf-8")
 
     def tearDown(self):
         import shutil
@@ -148,7 +148,7 @@ class TestGraphifyFormatNormalizationRegression(unittest.TestCase):
         self.addCleanup(shutil.rmtree, self._tmpdir, True)
         outdir = Path(self._tmpdir) / "graphify-out"
         outdir.mkdir()
-        (outdir / "graph.json").write_text(json.dumps(self.RAW_GRAPHIFY_GRAPH))
+        (outdir / "graph.json").write_text(json.dumps(self.RAW_GRAPHIFY_GRAPH), encoding="utf-8")
 
     def tearDown(self):
         import shutil
@@ -234,6 +234,29 @@ class TestCodeSearchSymbols(_FixtureBase):
         with patch.object(graph_io, "load_code_graph", return_value=None):
             result = code_graph_tools.code_search_symbols("anything")
         self.assertGreater(len(result["warnings"]), 0)
+
+    def test_unsupported_type_filter_warns_with_present_types(self):
+        # code_search_symbols shares graph_search_nodes' empty-filter failure
+        # mode: symbol_type='function' is not a real graphify type (only 'code'/
+        # 'document'), so the empty result must carry a warning naming the present
+        # types rather than reading as "no such symbol" (WINDOWS.md appendix).
+        result = code_graph_tools.code_search_symbols("myapp", symbol_type="function")
+        self.assertEqual(result["results"]["symbols"], [])
+        self.assertEqual(len(result["warnings"]), 1)
+        warning = result["warnings"][0]
+        self.assertIn("symbol_type", warning)
+        self.assertIn("function", warning)
+        self.assertIn("code", warning)
+        self.assertIn("document", warning)
+
+    def test_present_type_but_query_miss_has_no_warning(self):
+        # A real type ('code') that simply did not match the query text is a
+        # genuine miss, NOT a filter error — so no warning is emitted.
+        result = code_graph_tools.code_search_symbols(
+            "zzz_no_such_symbol_xyz", symbol_type="code"
+        )
+        self.assertEqual(result["results"]["symbols"], [])
+        self.assertEqual(result["warnings"], [])
 
 
 class TestCodeGetSymbol(_FixtureBase):
@@ -374,6 +397,40 @@ class TestGraphSearchNodesCode(_FixtureBase):
             result = shared_graph_tools.graph_search_nodes("anything", graph="code")
         self.assertGreater(len(result["warnings"]), 0)
 
+    def test_unmatched_type_filter_warns_with_present_types(self):
+        # WINDOWS.md appendix: a node_type the graph does not use (graphify only
+        # emits 'code' and 'document') must not read as "no such symbol". The
+        # result is empty but a warning names the types actually present, so the
+        # caller can tell an unsupported filter apart from a genuinely absent node.
+        result = shared_graph_tools.graph_search_nodes(
+            "myapp", graph="code", node_type="function", fuzzy=True
+        )
+        self.assertEqual(result["results"]["nodes"], [])
+        self.assertEqual(len(result["warnings"]), 1)
+        warning = result["warnings"][0]
+        self.assertIn("function", warning)
+        self.assertIn("code", warning)
+        self.assertIn("document", warning)
+
+    def test_matched_type_filter_has_no_spurious_warning(self):
+        # The complement: a filter that DOES match must not emit the warning.
+        result = shared_graph_tools.graph_search_nodes(
+            "myapp", graph="code", node_type="code", fuzzy=True
+        )
+        self.assertGreater(len(result["results"]["nodes"]), 0)
+        self.assertEqual(result["warnings"], [])
+
+    def test_present_type_but_query_miss_has_no_warning(self):
+        # A real type ('code') present in the graph but whose query simply did not
+        # match must NOT warn — the empty result is a genuine miss, not an
+        # unsupported filter. (Regression for the old second-pass logic that fired
+        # on ANY filtered-query miss.)
+        result = shared_graph_tools.graph_search_nodes(
+            "zzz_no_such_node_xyz", graph="code", node_type="code"
+        )
+        self.assertEqual(result["results"]["nodes"], [])
+        self.assertEqual(result["warnings"], [])
+
 
 class TestGraphGetNode(_FixtureBase):
 
@@ -480,9 +537,9 @@ class TestGraphStatus(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmpdir:
             outdir = Path(tmpdir) / "graphify-out"
             outdir.mkdir()
-            with open(_FIXTURE) as fh:
+            with open(_FIXTURE, encoding="utf-8") as fh:
                 raw = fh.read()
-            (outdir / "graph.json").write_text(raw)
+            (outdir / "graph.json").write_text(raw, encoding="utf-8")
             with patch.object(graph_io, "get_repo_root", return_value=Path(tmpdir)):
                 result = shared_graph_tools.graph_status(graph="code")
         self.assertTrue(result["results"]["exists"])

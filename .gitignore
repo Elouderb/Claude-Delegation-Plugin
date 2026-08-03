@@ -45,3 +45,9 @@ env/
 .env
 graphify-out/
 .agent-os/
+
+# Generated launcher config (WINDOWS.md Section 5): the per-platform installers
+# generate these from templates/ with the venv interpreter's absolute path.
+# Templates are committed; the generated files are machine-specific.
+.mcp.json
+hooks/hooks.json

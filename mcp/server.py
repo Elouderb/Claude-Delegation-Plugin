@@ -18,6 +18,9 @@ focused sub-modules:
     code_graph_tools.py    - code_get_symbol, code_search_symbols,
                              code_get_dependencies, code_find_callers,
                              code_impact_analysis
+    memory_tools.py        - memory_ingest, memory_query, memory_status
+                             (OPTIONAL central vector-memory subsystem; degrades
+                             gracefully when its heavy deps are absent)
     graph_io.py            - get_repo_root, find_db_tools_dir,
                              refresh_database_graph, load_database_graph,
                              load_code_graph, format_graph_response, log
@@ -38,6 +41,7 @@ import code_graph_tools
 import db_graph_tools
 import graph_io
 import graph_server
+import memory_tools
 import shared_graph_tools
 
 # Re-export helpers so existing callers (e.g. test_server.py) can still do
@@ -168,6 +172,13 @@ code_search_symbols = server.tool()(code_graph_tools.code_search_symbols)
 code_get_dependencies = server.tool()(code_graph_tools.code_get_dependencies)
 code_find_callers = server.tool()(code_graph_tools.code_find_callers)
 code_impact_analysis = server.tool()(code_graph_tools.code_impact_analysis)
+
+# Memory tools (3) — OPTIONAL central vector-memory subsystem.  Registering them
+# never imports the heavy deps; each tool reports unavailability at call time if
+# the extras (mcp/memory_requirements.txt) are not installed.
+memory_ingest = server.tool()(memory_tools.memory_ingest)
+memory_query = server.tool()(memory_tools.memory_query)
+memory_status = server.tool()(memory_tools.memory_status)
 
 
 if __name__ == "__main__":

@@ -1,4 +1,5 @@
 import json
+import os
 from pathlib import Path
 
 from pyvis.network import Network
@@ -138,10 +139,20 @@ def main() -> None:
     )
 
     OUTPUT_FILE.parent.mkdir(parents=True, exist_ok=True)
-    network.write_html(
-        str(OUTPUT_FILE),
-        open_browser=False,
-    )
+    # pyvis's Network.write_html() opens the target via open(name, "w+") with NO
+    # encoding, so under a cp1252 default (Windows) any non-Latin-1 character in
+    # the schema raises UnicodeEncodeError *after* open() has already truncated
+    # the file — leaving a 0-byte page served as HTTP 200 (WINDOWS.md §3).
+    # Generate the markup, then write it ourselves with an explicit UTF-8
+    # encoding AND atomically (tmp + os.replace), mirroring
+    # build_db_graph.atomic_write_text (the reference impl). The atomic swap
+    # matters because the Flask UI serves this file live: a plain write_text()
+    # leaves a window where a reader can fetch a half-written page as HTTP 200 —
+    # the same partial-page failure class this fix set out to close.
+    html = network.generate_html(str(OUTPUT_FILE), notebook=False)
+    tmp_path = OUTPUT_FILE.with_suffix(OUTPUT_FILE.suffix + ".tmp")
+    tmp_path.write_text(html, encoding="utf-8")
+    os.replace(tmp_path, OUTPUT_FILE)
 
     print(f"Visualization created: {OUTPUT_FILE}")
 

@@ -12,6 +12,7 @@ import graph_io
 from graph_io import (
     format_graph_response,
     log,
+    type_filter_warning,
 )
 
 
@@ -79,9 +80,12 @@ def code_search_symbols(query: str, symbol_type: Optional[str] = None) -> dict:
 
         nodes = graph_data.get("nodes", [])
         results = []
+        present_types: set = set()
 
         for node in nodes:
             node_type = node.get("type", "")
+            if node_type not in (None, ""):
+                present_types.add(str(node_type))
             if symbol_type and symbol_type != node_type:
                 continue
 
@@ -94,8 +98,16 @@ def code_search_symbols(query: str, symbol_type: Optional[str] = None) -> dict:
                     "source_location": node.get("source_location")
                 })
 
+        # code_search_symbols shares graph_search_nodes' empty-filter failure mode
+        # (symbol_type values are file_type 'code'/'document', not 'function'/
+        # 'class') and is the more likely agent entry point per the documented
+        # tool ladder — so it gets the same unsupported-type warning. Only an
+        # absent type warns; present_types was gathered in the loop above.
+        warnings = (type_filter_warning(symbol_type, present_types, field="symbol_type")
+                    if not results else [])
+
         return format_graph_response("code", {"query": query, "type": symbol_type},
-                                    {"symbols": results})
+                                    {"symbols": results}, warnings=warnings)
     except Exception as e:
         log(f"ERROR in code_search_symbols: {e}")
         return format_graph_response("code", {"query": query}, {}, [str(e)])

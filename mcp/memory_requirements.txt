@@ -1,0 +1,32 @@
+# Optional dependencies for the central memory subsystem (memory_ingest /
+# memory_query / memory_status).  NOT required by the core card tools or the
+# code/database graph tools — the MCP server starts and every other tool works
+# without these installed; the memory_* tools simply report the subsystem as
+# unavailable until they are present.
+#
+# Install with:
+#     pip install -r mcp/memory_requirements.txt
+#
+# The model (bge-small-en-v1.5) downloads once on first use and is then cached;
+# all subsequent embedding/retrieval runs fully offline.
+
+# Vector search: the vec0 SQLite extension.
+sqlite-vec>=0.1.6
+
+# A loadable-extension-capable SQLite. Many Python builds (pyenv, some
+# distro/macOS builds) ship a stdlib sqlite3 compiled WITHOUT loadable-extension
+# support, so sqlite-vec cannot load through it. pysqlite3-binary bundles a
+# modern, statically-linked SQLite with extension loading enabled and is the
+# portable way to run sqlite-vec. If your stdlib sqlite3 already exposes
+# Connection.enable_load_extension, this is technically optional, but installing
+# it is the reliable default.
+pysqlite3-binary>=0.5.0
+
+# Local embeddings (bge-small-en-v1.5, 384-dim).  >=3.2 is required for the
+# `backend=` constructor argument the ONNX/OpenVINO path relies on.
+sentence-transformers>=3.2
+
+# Optional: ONNX backend for sentence-transformers (set
+# AGENT_OS_MEMORY_ST_BACKEND=onnx). Uncomment to use it instead of the default
+# torch backend.
+# optimum[onnxruntime]>=1.20

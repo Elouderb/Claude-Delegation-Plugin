@@ -4,6 +4,49 @@ All notable changes to the **agent-os** plugin are documented here. The format i
 based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/), and this project
 adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.2.8] - 2026-08-03
+
+### Fixed
+- **Windows / cross-OS portability (WINDOWS.md epic).** The plugin no longer
+  ships an OS-specific interpreter path or a bare `python3` launcher — on Windows
+  `python3` resolves to a Microsoft Store execution-alias stub that silently
+  no-ops the server and every hook. `.mcp.json` and `hooks/hooks.json` are now
+  **generated** from committed templates by the bootstrap installer
+  (`installer/install.sh` / `installer/install.ps1`) with the venv interpreter's
+  absolute path. Related hardening: the `graphify` console script is resolved
+  venv-safely — the resolver probes the interpreter's OWN directory before
+  following the venv's `python` symlink out to the base interpreter, which the
+  previous `.resolve()`-first probe got wrong (it broke on POSIX venvs, e.g.
+  `.venv/bin/python -> pyenv`, not only on Windows); every child-process pipe now
+  decodes UTF-8 with `errors="replace"` and exports `PYTHONIOENCODING=utf-8`, so
+  a cp1252 console can no longer turn a *successful* `graphify` run into a decode
+  failure that leaves the graph marked dirty forever; `mcp/setup-mcp.sh` (the
+  no-plugin per-project path) now launches the plugin venv interpreter instead of
+  `python3`; and the live-served database-graph HTML is written atomically
+  (tmp + `os.replace`) to close a partial-page-as-HTTP-200 window.
+- **Type-filtered graph searches now explain an empty result.** `graph_search_
+  nodes` and `code_search_symbols` warn when the requested `node_type`/
+  `symbol_type` is absent from the graph (naming the types that ARE present), so
+  an unsupported filter is distinguishable from a genuinely missing symbol.
+
+### Changed
+- **`.mcp.json` / `hooks/hooks.json` are now generated artifacts, not committed
+  source.** Only `templates/mcp.json.tmpl` and `templates/hooks.json.tmpl` are
+  tracked (git-ignored output). In the plugin's OWN repo the PreToolUse guard
+  blocks hand-edits to the generated files (edit the template/generator instead);
+  in a *consuming* repo a hand-written `.mcp.json` is still allowed.
+
+### Upgrading
+- **After pulling this version, existing installs must re-run the installer**
+  (`installer/install.sh`, or `installer/install.ps1` on Windows) to regenerate
+  `.mcp.json` and `hooks/hooks.json`. On `git pull` those files are either removed
+  from your working tree (if unmodified) or block the merge (if you hand-edited
+  them). Until the installer runs, the plugin registers nothing — the MCP server
+  is not loaded and the hooks never fire (silent by design, not an error). If a
+  hand-edited copy blocks the pull, stash or discard it first (`git checkout --
+  .mcp.json hooks/hooks.json`), then re-run the installer. This mirrors the
+  one-time `git rm -r --cached .agent-os/` migration from 0.2.7.
+
 ## [0.2.7] - 2026-06-22
 
 ### Fixed

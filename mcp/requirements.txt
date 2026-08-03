@@ -11,8 +11,10 @@ mcp>=1.0,<2
 flask           # mcp/db_tools/app.py graph viewer
 python-dotenv   # app.py reads per-repo .env via dotenv_values()
 
-# Optional: only needed for the database-graph tools (db_* / SQL Server schema
-# graph). Install separately, e.g.:  pip install pyodbc networkx pyvis
-# pyodbc          # SQL Server connectivity (also needs the system ODBC driver)
-# networkx        # graph construction in build_db_graph.py
-# pyvis           # HTML visualization in build_graph_html.py
+# Optional extras live in their own files so this core set stays minimal (mcp,
+# flask, python-dotenv) and the installers can select them:
+#   - database-graph tools (db_* / SQL Server schema graph):  mcp/db_requirements.txt
+#     (pyodbc, networkx, pyvis)
+#   - central memory (memory_* tools):                        mcp/memory_requirements.txt
+# The plugin installers (installer/install.sh, installer/install.ps1) prompt for
+# these or accept --with-db / --with-memory (see WINDOWS.md Section 5.4).

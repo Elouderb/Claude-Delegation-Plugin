@@ -26,6 +26,19 @@ tools:
   - mcp__plugin_playwright_playwright__browser_console_messages
   - mcp__plugin_playwright_playwright__browser_network_requests
   - mcp__plugin_playwright_playwright__browser_resize
+  - mcp__playwright__browser_navigate
+  - mcp__playwright__browser_snapshot
+  - mcp__playwright__browser_take_screenshot
+  - mcp__playwright__browser_click
+  - mcp__playwright__browser_type
+  - mcp__playwright__browser_fill_form
+  - mcp__playwright__browser_hover
+  - mcp__playwright__browser_select_option
+  - mcp__playwright__browser_press_key
+  - mcp__playwright__browser_wait_for
+  - mcp__playwright__browser_console_messages
+  - mcp__playwright__browser_network_requests
+  - mcp__playwright__browser_resize
 ---
 
 You confirm that a change works by running the real thing — not by reading code or trusting that tests passed.
