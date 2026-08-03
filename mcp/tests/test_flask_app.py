@@ -356,6 +356,7 @@ class TestRefreshSecurity(_AppTestCase):
         with tempfile.TemporaryDirectory() as tmpdir:
             with self._patch_slug("my-repo", Path(tmpdir)), \
                  patch.dict(os.environ, {"DB_CONNECTION_STRING": secret}), \
+                 patch.object(flask_app_module, "_pyvis_available", return_value=True), \
                  patch.object(flask_app_module.subprocess, "run", side_effect=err):
                 resp = self.client.post(
                     "/my-repo/refresh/db",
@@ -377,6 +378,7 @@ class TestRefreshSecurity(_AppTestCase):
         with tempfile.TemporaryDirectory() as tmpdir:
             with self._patch_slug("my-repo", Path(tmpdir)), \
                  patch.dict(os.environ, {"DB_CONNECTION_STRING": secret}), \
+                 patch.object(flask_app_module, "_pyvis_available", return_value=True), \
                  patch.object(flask_app_module.subprocess, "run", return_value=ok):
                 resp = self.client.post(
                     "/my-repo/refresh/db",
@@ -387,6 +389,20 @@ class TestRefreshSecurity(_AppTestCase):
         self.assertEqual(json.loads(body)["status"], "refreshed")
         self.assertNotIn(secret, body)
         self.assertNotIn("build_output", body)
+
+    def test_refresh_db_without_pyvis_returns_actionable_error(self):
+        # pyvis lives in the opt-in database extra; without it the refresh must
+        # fail up front with a clear pointer, not an invisible child crash.
+        with tempfile.TemporaryDirectory() as tmpdir:
+            with self._patch_slug("my-repo", Path(tmpdir)), \
+                 patch.dict(os.environ, {"DB_CONNECTION_STRING": "Driver=fake;"}), \
+                 patch.object(flask_app_module, "_pyvis_available", return_value=False):
+                resp = self.client.post(
+                    "/my-repo/refresh/db",
+                    headers={"X-Requested-With": "XMLHttpRequest"},
+                )
+        self.assertEqual(resp.status_code, 500)
+        self.assertIn("db_requirements", resp.data.decode())
 
 
 class TestTaskCardDetailRoute(_AppTestCase):

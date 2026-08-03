@@ -1307,6 +1307,12 @@ def refresh_repo(slug: str):
     })
 
 
+def _pyvis_available() -> bool:
+    # Seam for tests: the mocked-builder refresh tests must not depend on
+    # whether the optional database extra happens to be installed in the env.
+    return importlib.util.find_spec("pyvis") is not None
+
+
 @app.post("/<slug>/refresh/db")
 def refresh_db(slug: str):
     repo_root, _, _ = _paths(slug)
@@ -1326,7 +1332,7 @@ def refresh_db(slug: str):
     # credential), so a missing pyvis would otherwise fail as an invisible
     # ModuleNotFoundError leaving the JSON and HTML out of sync. Guard it up front
     # with a clear, actionable error instead.
-    if importlib.util.find_spec("pyvis") is None:
+    if not _pyvis_available():
         return jsonify({"error": "pyvis is not installed — install the database "
                                  "extra: mcp/db_requirements.txt"}), 500
 

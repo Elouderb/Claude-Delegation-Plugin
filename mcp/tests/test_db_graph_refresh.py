@@ -622,6 +622,7 @@ class TestUiRefreshBuildsHtml(unittest.TestCase):
             with patch.object(flask_app_module, "_repo_root_for_slug", return_value=repo_root), \
                  patch.object(flask_app_module, "dotenv_values",
                               return_value={"DB_CONNECTION_STRING": "Driver=fake;"}), \
+                 patch.object(flask_app_module, "_pyvis_available", return_value=True), \
                  patch.object(flask_app_module.subprocess, "run", side_effect=fake_run):
                 resp = client.post(
                     "/myrepo/refresh/db",

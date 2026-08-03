@@ -58,9 +58,12 @@ class TestLoadCommand(unittest.TestCase):
             command, args, env = vi.load_command(
                 mcp_json, "task-cards", Path("/plugin/here")
             )
+            # str(Path(...)) renders platform separators (backslashes on
+            # Windows) — production-correct, so the expectation must match.
+            root = str(Path("/plugin/here"))
             self.assertEqual(command, "/venv/bin/python")
-            self.assertEqual(args, ["/plugin/here/mcp/server.py"])
-            self.assertEqual(env["CLAUDE_PLUGIN_ROOT"], "/plugin/here")
+            self.assertEqual(args, [f"{root}/mcp/server.py"])
+            self.assertEqual(env["CLAUDE_PLUGIN_ROOT"], root)
 
     def test_missing_server_raises(self):
         with tempfile.TemporaryDirectory() as tmp:
