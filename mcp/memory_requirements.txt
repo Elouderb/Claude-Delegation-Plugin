@@ -17,10 +17,12 @@ sqlite-vec>=0.1.6
 # distro/macOS builds) ship a stdlib sqlite3 compiled WITHOUT loadable-extension
 # support, so sqlite-vec cannot load through it. pysqlite3-binary bundles a
 # modern, statically-linked SQLite with extension loading enabled and is the
-# portable way to run sqlite-vec. If your stdlib sqlite3 already exposes
-# Connection.enable_load_extension, this is technically optional, but installing
-# it is the reliable default.
-pysqlite3-binary>=0.5.0
+# portable way to run sqlite-vec on Linux. It ships NO Windows/macOS wheels
+# (a bare pin here broke `install.ps1 --with-memory` on Windows — M2 field
+# report 2026-08-04), so it is Linux-marked: python.org Windows builds ship an
+# extension-capable stdlib sqlite3, and mcp/memory/availability.py probes and
+# falls back to stdlib automatically.
+pysqlite3-binary>=0.5.0 ; sys_platform == "linux"
 
 # Local embeddings (bge-small-en-v1.5, 384-dim).  >=3.2 is required for the
 # `backend=` constructor argument the ONNX/OpenVINO path relies on.
