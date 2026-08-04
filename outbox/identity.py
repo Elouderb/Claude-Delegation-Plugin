@@ -103,6 +103,12 @@ def git_remote_origin(repo_root: _PathLike) -> Optional[str]:
     try:
         result = subprocess.run(
             ["git", "-C", str(repo_root), "remote", "get-url", "origin"],
+            # stdin=DEVNULL: this runs in the MCP-server process at startup
+            # (bootstrap_identity -> here, before server.run()); without it the git
+            # child inherits the server's blocking-read stdin pipe and can stall on
+            # Windows (the M2 hang class), delaying run() and taking every tool down.
+            # git remote get-url never reads stdin, so DEVNULL is purely defensive.
+            stdin=subprocess.DEVNULL,
             capture_output=True,
             text=True,
             encoding="utf-8",

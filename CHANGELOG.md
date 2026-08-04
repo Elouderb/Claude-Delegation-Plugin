@@ -4,9 +4,28 @@ All notable changes to the **agent-os** plugin are documented here. The format i
 based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/), and this project
 adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [Unreleased]
+## [0.2.9] - 2026-08-04
 
 ### Fixed
+- **Windows: the graph board (and sync drain) no longer hang on startup.** The
+  MCP server spawns companion subprocesses (the Flask graph UI, the sync-drain
+  worker) that inherited the server's stdin — which, as Claude Code's MCP stdio
+  pipe, the parent holds a permanent blocking read on. On Windows, synchronous
+  I/O on a shared pipe serializes, so a spawned child's interpreter startup hung
+  before running a line of Python: 0 CPU, empty log, port never bound (M2 field
+  diagnosis 2026-08-04, proven by a native stack dump + minimal repro). Every
+  subprocess spawned from the MCP-server process now sets `stdin=DEVNULL` — the
+  two companions plus the `graphify` code-graph refresh and the identity-bootstrap
+  `git` call (which ran before the tool loop, so its hang took *all* tools down).
+- **Windows companion lifecycle + visibility.** Companions are now assigned to a
+  Windows Job Object (`KILL_ON_JOB_CLOSE`) so `/reload-plugins` can't leave
+  orphans (the OS analogue of the Linux `pdeathsig` coupling); companion startup
+  is isolated so a failing/​slow companion can never block card-tool registration;
+  stale-port recovery reuses a healthy server, reclaims our own wedged one, or
+  relocates off a foreign port; per-port logs are named by the *actual* bound
+  port and empty logs are cleaned up (a stale empty `graph_server-5000.log` is
+  what misdiagnosed the hang above for hours); and the board URL is logged with
+  the real port on every start. `WINDOWS.md` §6 adds a PowerShell troubleshooting note.
 - **Windows: the memory extra no longer breaks `install.ps1`.**
   `mcp/memory_requirements.txt` pinned `pysqlite3-binary` bare, but that
   package ships Linux-only wheels — installing the central-memory extra on

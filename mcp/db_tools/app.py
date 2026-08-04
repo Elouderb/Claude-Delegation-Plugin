@@ -1249,8 +1249,19 @@ def download_db_markdown(slug: str):
 
 @app.get("/health")
 def health():
+    # ``pid`` + ``nonce`` are the stale-port IDENTITY fields: the spawning MCP server
+    # passes AGENT_OS_GRAPH_NONCE in this process's env and records the same nonce in
+    # its per-port owner file, so a LATER MCP-server process can recognize this exact
+    # instance (vs a foreign process) when deciding whether to reuse/reclaim the port.
+    # ``nonce`` is None for a server started before this field existed — still a valid
+    # agent-os server (the ``status``/``repos`` keys are the reuse signal).
     registry = _load_registry()
-    return jsonify({"status": "ok", "repos": sorted(registry.keys())})
+    return jsonify({
+        "status": "ok",
+        "repos": sorted(registry.keys()),
+        "pid": os.getpid(),
+        "nonce": os.environ.get("AGENT_OS_GRAPH_NONCE"),
+    })
 
 
 @app.get("/<slug>/health")

@@ -40,7 +40,7 @@ from pathlib import Path
 from typing import Dict, Optional
 
 from graph_io import log
-from graph_server import _make_pdeathsig_preexec
+from graph_server import _couple_child_to_parent, _make_pdeathsig_preexec
 
 # The spawned drain child we own (per MCP-server process) and the repo it covers,
 # recorded so the health/respawn touchpoint can restart it under the same root.
@@ -246,6 +246,10 @@ def _spawn_drain(repo_root: Path) -> Optional["subprocess.Popen[bytes]"]:
         proc = subprocess.Popen(
             [sys.executable, "-m", "outbox.drain", "--repo-root", str(repo_root)],
             cwd=str(repo_root),
+            # See graph_server._spawn_graph_server for the full rationale:
+            # inheriting the MCP server's blocking-read stdin pipe hangs the
+            # child's interpreter startup on Windows. DEVNULL is required.
+            stdin=subprocess.DEVNULL,
             stdout=out,
             stderr=subprocess.STDOUT,
             env=_child_env(),
@@ -257,6 +261,9 @@ def _spawn_drain(repo_root: Path) -> Optional["subprocess.Popen[bytes]"]:
     finally:
         if log_file is not None:
             log_file.close()
+    # Couple the child's lifetime to ours on Windows (Job Object). No-op on Linux,
+    # where the PR_SET_PDEATHSIG preexec_fn above already does it. Best-effort.
+    _couple_child_to_parent(proc)
     dest = log_path if log_file is not None else "DEVNULL"
     log(f"Sync worker started (PID: {proc.pid}); output -> {dest}")
     return proc

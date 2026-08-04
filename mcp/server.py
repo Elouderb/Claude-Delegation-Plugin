@@ -144,13 +144,29 @@ def ensure_agent_os():
         except Exception as e:
             log(f"Identity bootstrap skipped: {e}")
 
-        # Start the graph server after database initialization
-        start_graph_server()
+        # --- Companion startup is FULLY ISOLATED from card-tool availability ---
+        # Card tools are registered at import and only SERVED once server.run() is
+        # reached (below, in __main__). ensure_agent_os() must therefore always
+        # return so run() is reached: any companion failure — a held/stale/foreign
+        # port, a Job-Object/spawn error, a wedged old graph server — must NOT
+        # propagate here, or the outer `except: raise` would sys.exit(1) BEFORE
+        # run() and take EVERY tool (card tools included) down. That regression is
+        # exactly the M2 field report. Each companion start already self-guards;
+        # these belts double-guard the invariant and keep it true as the spawn path
+        # grows (bounded, never-hang). The graph-server startup itself is internally
+        # time-bounded (stale-port recovery never blocks).
+        try:
+            start_graph_server()
+        except Exception as e:
+            log(f"WARNING: graph server startup failed; card tools remain available: {e}")
 
-        # Start the outbox drain companion — OFF by default (AGENT_OS_SYNC=1 opts
-        # in). Spawned like the graph server (pdeathsig/respawn/log-file); a no-op
-        # unless enabled, so a stock install never phones home without consent.
-        sync_server.start_sync_worker(repo_root)
+        # The outbox drain companion — OFF by default (AGENT_OS_SYNC=1 opts in).
+        # Spawned like the graph server (pdeathsig/Job-Object/respawn/log-file); a
+        # no-op unless enabled, so a stock install never phones home without consent.
+        try:
+            sync_server.start_sync_worker(repo_root)
+        except Exception as e:
+            log(f"WARNING: sync worker startup failed; card tools remain available: {e}")
 
     except Exception as e:
         log(f"ERROR during database initialization: {e}")

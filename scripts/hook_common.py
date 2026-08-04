@@ -52,6 +52,11 @@ def git_root(start: str | Path | None = None) -> Path | None:
         result = subprocess.run(
             ["git", "-C", str(cwd), "rev-parse", "--show-toplevel"],
             check=True,
+            # stdin=DEVNULL: defensive against the Windows blocking-stdin-pipe hang
+            # class (see mcp/graph_server._spawn_graph_server). Hooks run as separate
+            # processes but still on Windows; a spawned git child should never inherit
+            # a pipe stdin. git rev-parse never reads stdin.
+            stdin=subprocess.DEVNULL,
             capture_output=True,
             text=True,
             encoding="utf-8",
@@ -245,6 +250,10 @@ def git_state_fingerprint(root: Path) -> str:
     for command in commands:
         result = subprocess.run(
             command,
+            # stdin=DEVNULL: defensive against the Windows blocking-stdin-pipe hang
+            # class (see mcp/graph_server._spawn_graph_server). git rev-parse/status
+            # never read stdin.
+            stdin=subprocess.DEVNULL,
             capture_output=True,
             timeout=20,
             check=False,
@@ -354,6 +363,11 @@ def refresh_graphify(root: Path, reason: str, timeout: int = 160) -> tuple[bool,
         result = subprocess.run(
             graphify_command(),
             cwd=root,
+            # stdin=DEVNULL: graphify is a Python console script — the SAME
+            # interpreter-startup hang class as the companion spawns on Windows if
+            # it inherits a blocking-read pipe stdin (M2 diagnosis, comment 162).
+            # capture_output only sets stdout/stderr, so set stdin explicitly.
+            stdin=subprocess.DEVNULL,
             capture_output=True,
             text=True,
             encoding="utf-8",
