@@ -103,7 +103,7 @@ class TestGraphServerLogRedirect(unittest.TestCase):
 
     def _write_child(self, name: str, src: str) -> Path:
         path = self._tmpdir / name
-        path.write_text(src)
+        path.write_text(src, encoding="utf-8")
         return path
 
     def test_no_block_on_large_output(self):
@@ -141,7 +141,7 @@ class TestGraphServerLogRedirect(unittest.TestCase):
 
         # The sentinel is the LAST thing written, after >64KB on both streams.
         # Its presence proves the child ran to completion rather than blocking.
-        text = self._log_path.read_text(errors="replace")
+        text = self._log_path.read_text(encoding="utf-8", errors="replace")
         self.assertIn(
             _SENTINEL,
             text,

@@ -57,7 +57,7 @@ def _make_graph_json(directory: Path) -> Path:
     db_dir = directory / ".agent-os" / "db"
     db_dir.mkdir(parents=True, exist_ok=True)
     graph_path = db_dir / "db_graph.json"
-    graph_path.write_text('{"nodes": [], "edges": []}')
+    graph_path.write_text('{"nodes": [], "edges": []}', encoding="utf-8")
     return graph_path
 
 
@@ -65,8 +65,8 @@ def _make_fake_db_tools(tmp: Path) -> Path:
     """Create a fake db_tools dir holding empty build scripts; return its path."""
     fake_db_tools = tmp / "db_tools"
     fake_db_tools.mkdir()
-    (fake_db_tools / "build_db_graph.py").write_text("")
-    (fake_db_tools / "build_graph_html.py").write_text("")
+    (fake_db_tools / "build_db_graph.py").write_text("", encoding="utf-8")
+    (fake_db_tools / "build_graph_html.py").write_text("", encoding="utf-8")
     return fake_db_tools
 
 
@@ -121,7 +121,7 @@ class TestTTLCacheHitAfterRebuild(unittest.TestCase):
             def build_side_effect(repo_root, include_html=False):
                 # Emulate the real build writing the JSON file.
                 if not graph_path.exists():
-                    graph_path.write_text('{"nodes":[],"edges":[]}')
+                    graph_path.write_text('{"nodes":[],"edges":[]}', encoding="utf-8")
 
             build_mock = MagicMock(side_effect=build_side_effect)
 
@@ -270,7 +270,7 @@ class TestToolPathSkipsHtml(unittest.TestCase):
             graph_path = db_dir / "db_graph.json"
 
             def build_side_effect(repo_root, include_html=False):
-                graph_path.write_text('{"nodes":[],"edges":[]}')
+                graph_path.write_text('{"nodes":[],"edges":[]}', encoding="utf-8")
 
             build_mock = MagicMock(side_effect=build_side_effect)
             fake_db_tools = _make_fake_db_tools(tmp)
@@ -622,6 +622,7 @@ class TestUiRefreshBuildsHtml(unittest.TestCase):
             with patch.object(flask_app_module, "_repo_root_for_slug", return_value=repo_root), \
                  patch.object(flask_app_module, "dotenv_values",
                               return_value={"DB_CONNECTION_STRING": "Driver=fake;"}), \
+                 patch.object(flask_app_module, "_pyvis_available", return_value=True), \
                  patch.object(flask_app_module.subprocess, "run", side_effect=fake_run):
                 resp = client.post(
                     "/myrepo/refresh/db",

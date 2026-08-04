@@ -1,0 +1,28 @@
+[
+  {
+    "title": "Cooking pasta",
+    "create_time": 1700000000.0,
+    "update_time": 1700000030.0,
+    "conversation_id": "conv-abc-1",
+    "current_node": "n3",
+    "mapping": {
+      "root": {"id": "root", "message": null, "parent": null, "children": ["n0"]},
+      "n0": {"id": "n0", "message": {"id": "m0", "author": {"role": "system"}, "content": {"content_type": "text", "parts": [""]}, "create_time": null}, "parent": "root", "children": ["n1"]},
+      "n1": {"id": "n1", "message": {"id": "m1", "author": {"role": "user"}, "content": {"content_type": "text", "parts": ["How do I cook spaghetti al dente?"]}, "create_time": 1700000010.0}, "parent": "n0", "children": ["n2"]},
+      "n2": {"id": "n2", "message": {"id": "m2", "author": {"role": "assistant"}, "content": {"content_type": "text", "parts": ["Boil salted water, add the pasta, and cook it one minute less than the package instructions say."]}, "create_time": 1700000020.0}, "parent": "n1", "children": ["n3"]},
+      "n3": {"id": "n3", "message": {"id": "m3", "author": {"role": "user"}, "content": {"content_type": "text", "parts": ["Thanks, that helps!"]}, "create_time": 1700000030.0}, "parent": "n2", "children": []}
+    }
+  },
+  {
+    "title": "Weather tool call",
+    "create_time": 1700100000.0,
+    "id": "conv-def-2",
+    "current_node": "b2",
+    "mapping": {
+      "b_root": {"id": "b_root", "message": null, "parent": null, "children": ["b0"]},
+      "b0": {"id": "b0", "message": {"id": "bm0", "author": {"role": "user"}, "content": {"content_type": "text", "parts": ["What is the weather in Boston today?"]}}, "parent": "b_root", "children": ["b1"]},
+      "b1": {"id": "b1", "message": {"id": "bm1", "author": {"role": "tool"}, "content": {"content_type": "text", "parts": ["{\"temp_c\": 21, \"conditions\": \"clear\"}"]}}, "parent": "b0", "children": ["b2"]},
+      "b2": {"id": "b2", "message": {"id": "bm2", "author": {"role": "assistant"}, "content": {"content_type": "text", "parts": [null]}}, "parent": "b1", "children": []}
+    }
+  }
+]

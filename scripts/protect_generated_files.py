@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import sys
-from hook_common import git_root, is_generated, read_hook_input, relative_to_root
+from hook_common import git_root, is_generated_in_repo, read_hook_input, relative_to_root
 
 def main() -> int:
     payload = read_hook_input()
@@ -15,7 +15,7 @@ def main() -> int:
         return 0
 
     rel = relative_to_root(path, root)
-    if rel is not None and is_generated(rel):
+    if rel is not None and is_generated_in_repo(rel, root):
         print(
             f"Blocked direct edit to generated artifact: {rel.as_posix()}. "
             "Modify the source or generator instead.",

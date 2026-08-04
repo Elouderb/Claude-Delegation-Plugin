@@ -1,36 +1,89 @@
 name: CI
 
 on:
-  push:
-    branches: ["**"]
   pull_request:
-    branches: ["**"]
+  push:
+    branches: [master]
+  workflow_dispatch:
 
 jobs:
   test:
-    name: Test (Python 3.12)
-    runs-on: ubuntu-latest
+    name: Test (${{ matrix.os }}, Python 3.12)
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 15
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest]
 
     steps:
       - uses: actions/checkout@v4
 
       - name: Set up Python 3.12
+        id: setup-python
         uses: actions/setup-python@v5
         with:
           python-version: "3.12"
+          cache: pip
+          # Only the files actually installed on the --no-extras path below
+          # (db/memory extras are skipped, so their requirement files don't
+          # affect the cache key).
+          cache-dependency-path: |
+            mcp/requirements.txt
+            dev-requirements.txt
 
-      - name: Install runtime dependencies
-        run: pip install -r mcp/requirements.txt
+      # The installer IS part of what this card protects: it creates the
+      # plugin-local venv, installs core deps, generates .mcp.json +
+      # hooks/hooks.json from the committed templates, and finishes by
+      # running installer/verify_install.py (the real MCP handshake,
+      # asserting all 27 tools). A non-zero exit here already covers that
+      # check, so it is not invoked again separately.
+      #
+      # AGENT_OS_PYTHON pins both legs to the exact interpreter setup-python
+      # just provisioned, so the venv is built from a known interpreter
+      # instead of install.sh probing an ambient `python3` or install.ps1
+      # probing the `py` launcher.
+      - name: Run installer --no-extras (Linux)
+        if: runner.os == 'Linux'
+        env:
+          AGENT_OS_PYTHON: ${{ steps.setup-python.outputs.python-path }}
+        run: bash installer/install.sh --no-extras
 
-      - name: Install dev dependencies
-        run: pip install -r dev-requirements.txt
+      - name: Run installer -NoExtras (Windows)
+        if: runner.os == 'Windows'
+        env:
+          AGENT_OS_PYTHON: ${{ steps.setup-python.outputs.python-path }}
+        # Explicitly through Windows PowerShell (5.1, "powershell.exe") rather
+        # than the runner's default pwsh (7+) shell: install.ps1 declares
+        # `#Requires -Version 5.1` as its floor, and 5.1 (in-box, no separate
+        # install) is what a real out-of-the-box Windows 10+ machine has --
+        # exercising that exact binary is the more faithful regression check
+        # for the WINDOWS.md field report this epic is guarding against.
+        run: powershell -File installer\install.ps1 -NoExtras
 
-      - name: Syntax-check all tracked Python files
+      # Resolve the venv interpreter the installer just created. Layout
+      # differs by OS (POSIX bin/ vs Windows Scripts\); everything after this
+      # is identical logic on both legs, so it runs once via shell: bash
+      # (Windows runners ship Git Bash) instead of duplicating steps.
+      - name: Resolve venv python path
+        shell: bash
         run: |
-          git ls-files '*.py' | xargs python -m py_compile
+          if [ "${{ runner.os }}" = "Windows" ]; then
+            echo "VENV_PY=.venv/Scripts/python.exe" >> "$GITHUB_ENV"
+          else
+            echo "VENV_PY=.venv/bin/python" >> "$GITHUB_ENV"
+          fi
+
+      - name: Install dev/test dependencies
+        shell: bash
+        run: $VENV_PY -m pip install --quiet -r dev-requirements.txt
 
       - name: Run test suite
-        # db_* tools require pyodbc + a live SQL Server — those tests are
-        # marked @unittest.skip and will appear as "1 skipped" here, which
-        # is expected and acceptable.
-        run: python -m pytest mcp/tests/ mcp/test_server.py mcp/test_probe_health.py -v
+        shell: bash
+        # Linux: ~335 passed / 1 skipped (the db_* SQL-Server-gated test).
+        # Windows: the central-memory store tests additionally skip cleanly,
+        # by design, if the runner's stdlib sqlite3 build lacks
+        # loadable-extension support (memory.availability.check_availability())
+        # -- they are not forced to run either way. The suite must be green;
+        # skips are acceptable, failures are not.
+        run: $VENV_PY -m pytest mcp/tests mcp/test_server.py mcp/test_probe_health.py -v

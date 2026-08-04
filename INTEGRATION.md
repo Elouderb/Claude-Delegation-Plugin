@@ -6,8 +6,10 @@ Code and your projects.
 ## Recommended: install via the local marketplace
 
 ```bash
-# 1. Install the MCP server's Python dependencies
-pip install -r mcp/requirements.txt
+# 1. Bootstrap: create the plugin venv, install deps, and GENERATE the launcher
+#    config (.mcp.json + hooks/hooks.json) with this machine's interpreter path.
+installer/install.sh            # POSIX (Linux/macOS)
+# powershell -ExecutionPolicy Bypass -File installer\install.ps1   # Windows
 
 # 2. Register the local marketplace defined in .claude-plugin/marketplace.json
 #    (marketplace name: agent-os-local) and install the plugin:
@@ -18,9 +20,13 @@ pip install -r mcp/requirements.txt
 ```
 
 This auto-discovers the manifest, MCP server (`.mcp.json`), hooks, agents, and
-skills. Because `.mcp.json` launches `python3 ${CLAUDE_PLUGIN_ROOT}/mcp/server.py`,
-nothing needs editing per machine. Run `claude plugin validate /path/to/agent-os`
-to confirm it loads.
+skills. `.mcp.json` and `hooks/hooks.json` are **generated** by the installer (not
+committed) from the templates in `templates/`, with the venv interpreter's
+absolute path substituted — so you must run the installer first, and there is
+nothing to hand-edit per machine. On a fresh clone, before the installer runs,
+those files simply do not exist yet and the plugin registers nothing (silent by
+design; see the README's fresh-clone/upgrading notes). Run `claude plugin validate
+/path/to/agent-os` to confirm it loads.
 
 > **For local development of the plugin**, you can live-load the directory
 > instead: `claude --plugin-dir /path/to/agent-os`. This is a dev convenience,
@@ -31,10 +37,11 @@ to confirm it loads.
 `.mcp.json` intentionally references `${CLAUDE_PLUGIN_ROOT}/mcp/server.py`. That
 variable is only injected when the file is loaded **as a plugin**. If you run Claude
 Code from inside this repo, the same `.mcp.json` is *also* picked up as a normal
-project-scope MCP config, where `${CLAUDE_PLUGIN_ROOT}` is unset — so it expands to
-`python3 /mcp/server.py`, which does not exist, and the server fails to start
-(`Failed to reconnect to task-cards: -32000`). With the plugin installed too, both
-register under the name `task-cards` and collide.
+project-scope MCP config, where `${CLAUDE_PLUGIN_ROOT}` is unset — so the
+`${CLAUDE_PLUGIN_ROOT}/mcp/server.py` argument expands to `/mcp/server.py`, which
+does not exist, and the server fails to start (`Failed to reconnect to task-cards:
+-32000`). With the plugin installed too, both register under the name `task-cards`
+and collide.
 
 Do **not** change `.mcp.json` to a relative path to "fix" this — the relative path
 would then break the plugin for every other project. Instead, suppress the
@@ -65,11 +72,14 @@ agents, and skills), you can wire just the server with `setup-mcp.sh`.
 > and collide (see the gotcha above). Pick one mechanism per project: the
 > installed plugin **or** a project-scope `.mcp.json`, never both.
 
-### 1. Install dependencies
+### 1. Bootstrap the plugin venv
+
+`setup-mcp.sh` launches the server with the plugin's OWN venv interpreter, so run
+the bootstrap installer once to create it (it also installs the dependencies):
 
 ```bash
 cd /path/to/agent-os
-pip install -r mcp/requirements.txt
+installer/install.sh            # POSIX; Windows: powershell -File installer\install.ps1
 ```
 
 ### 2. Enable for your project
@@ -79,9 +89,13 @@ pip install -r mcp/requirements.txt
 ```
 
 This creates a `.mcp.json` file in your project root that:
-- Points to the task-cards server
+- Points to the task-cards server via the plugin venv interpreter (absolute path)
 - Creates project-local storage in `.agent-os/cards.sqlite`
-- Can be committed to git so teammates get it automatically
+
+The interpreter path is machine-specific, so **do not commit this `.mcp.json`** —
+each teammate runs `setup-mcp.sh` (after the installer) to generate their own.
+`setup-mcp.sh` errors out with a pointer to the installer if the venv is missing,
+rather than writing a config that launches a broken interpreter.
 
 ### 3. Restart and Use
 
@@ -181,11 +195,14 @@ archive_after_days = 30
 - Check file permissions
 
 ### MCP server not connecting?
-- Verify Python path in settings is correct
-- Check `mcp/requirements.txt` dependencies are installed
-- Run `python3 mcp/server.py` manually to test. The server logs to **STDERR**
-  (required for MCP stdio transport — diagnostic output on STDOUT would corrupt
-  the protocol), so look there for startup errors.
+- Re-run the installer (`installer/install.sh`, or `install.ps1` on Windows). It
+  regenerates `.mcp.json` / `hooks/hooks.json` and verifies the handshake; a fresh
+  clone has neither until it runs, so the server is simply not registered yet.
+- Run the plugin venv interpreter against the server manually to test, e.g.
+  `.venv/bin/python mcp/server.py` (`.venv\Scripts\python.exe mcp\server.py` on
+  Windows). The server logs to **STDERR** (required for MCP stdio transport —
+  diagnostic output on STDOUT would corrupt the protocol), so look there for
+  startup errors.
 
 ### Getting "Card not found"?
 - Verify card_id is correct (8 chars, format: `abc12345`)

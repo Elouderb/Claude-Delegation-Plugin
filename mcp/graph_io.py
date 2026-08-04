@@ -33,6 +33,7 @@ the user.  Only when no cached file is available does a failure return
 
 import json
 import os
+import shutil
 import sys
 import threading
 import time
@@ -179,6 +180,63 @@ def log(message: str):
     """
     timestamp = datetime.now().isoformat()
     print(f"[{timestamp}] {message}", file=sys.stderr, flush=True)
+
+
+def resolve_graphify() -> str:
+    """Resolve the ``graphify`` console script in a venv-safe, cross-platform way.
+
+    The MCP server's interpreter is invoked by absolute path, so the venv's
+    ``Scripts/`` (Windows) / ``bin/`` (POSIX) directory is NOT on ``PATH`` and a
+    bare ``graphify`` fails to resolve there even when correctly installed
+    (WINDOWS.md §2). Resolution order:
+
+      1. ``AGENT_OS_GRAPHIFY_EXECUTABLE`` env override — used verbatim if set.
+      2. A console script beside ``sys.executable`` — ``graphify.exe`` then
+         ``graphify`` — so ``Scripts/graphify.exe`` and ``bin/graphify`` both
+         resolve without touching ``PATH``.
+      3. ``shutil.which('graphify')`` on ``PATH``.
+      4. Fall back to the bare name ``"graphify"`` so the caller's existing
+         ``FileNotFoundError`` handling surfaces a clear "not found" message.
+
+    A byte-for-byte twin of scripts/hook_common.resolve_graphify(). They are kept
+    as separate copies (not a shared import) because they run from different entry
+    points with different sys.path roots — the hooks execute standalone from
+    ``scripts/`` while this runs inside the MCP server under ``mcp/`` — so a shared
+    module would need fragile cross-directory path insertion that varies by
+    install layout. mcp/tests/test_resolve_graphify.py runs every copy through one
+    subTest battery so the twins cannot drift. Returns a command token; never
+    raises.
+    """
+    override = os.getenv("AGENT_OS_GRAPHIFY_EXECUTABLE")
+    if override:
+        return override
+
+    # Probe the interpreter's OWN directory first (raw, un-resolved). In a venv,
+    # sys.executable is .venv/bin/python — itself a symlink — and pip installs the
+    # ``graphify`` console script beside that symlink in .venv/bin. Calling
+    # ``.resolve()`` first follows the symlink OUT of the venv (e.g. to the
+    # pyenv/system bin the venv was built from), where the venv's graphify does
+    # NOT exist, so the beside-interpreter probe misses and falls through to a
+    # PATH lookup that also fails (WINDOWS.md §2; verified live on POSIX where
+    # .venv/bin/python -> pyenv). We still probe the resolved parent second, which
+    # covers a graphify installed beside the base interpreter (pyenv-installed, no
+    # venv shim). Raw wins on ties so the venv's own console script is preferred.
+    raw_dir = Path(sys.executable).parent
+    resolved_dir = Path(sys.executable).resolve().parent
+    probe_dirs = [raw_dir]
+    if resolved_dir != raw_dir:
+        probe_dirs.append(resolved_dir)
+    for exe_dir in probe_dirs:
+        for name in ("graphify.exe", "graphify"):
+            candidate = exe_dir / name
+            if candidate.exists():
+                return str(candidate)
+
+    found = shutil.which("graphify")
+    if found:
+        return found
+
+    return "graphify"
 
 
 def get_repo_root() -> Path:
@@ -423,14 +481,14 @@ def load_database_graph() -> Optional[Dict[str, Any]]:
         if not graph_path.exists():
             return None
 
-        with open(graph_path, 'r') as f:
+        with open(graph_path, 'r', encoding="utf-8") as f:
             return json.load(f)
     except Exception as e:
         log(f"ERROR loading database graph: {e}")
         return None
 
 
-def _normalize_code_graph(graph: Dict[str, Any]) -> Dict[str, Any]:
+def _normalize_code_graph(graph: Any) -> Any:
     """Normalize a graphify NetworkX node-link graph to the shape the tools read.
 
     graphify emits NetworkX node-link JSON, where edges live under a top-level
@@ -476,15 +534,41 @@ def load_code_graph() -> Optional[Dict[str, Any]]:
         if not graph_path.exists():
             return None
 
-        with open(graph_path, 'r') as f:
+        with open(graph_path, 'r', encoding="utf-8") as f:
             return _normalize_code_graph(json.load(f))
     except Exception as e:
         log(f"ERROR loading code graph: {e}")
         return None
 
 
+def type_filter_warning(requested_type: Optional[str], present_types: set,
+                        field: str = "node_type") -> List[str]:
+    """Shared empty-filter diagnostic for the type-filtered search tools.
+
+    A ``node_type``/``symbol_type`` filter that matches nothing is
+    indistinguishable from "no such symbol" (WINDOWS.md appendix). graphify's
+    node types are file_type values (only ``code`` and ``document``), so an agent
+    filtering ``type='function'`` gets a confident-but-empty result with no
+    explanation. Return a single warning ONLY when the requested type is absent
+    from the graph — i.e. the filter itself is unsupported — naming the types that
+    are actually present. A filter that IS a real type but simply did not match
+    the query text returns no warning (the empty result is a genuine miss, not a
+    filter error).
+
+    ``present_types`` is accumulated by the caller during its single pass over the
+    nodes, so this adds no extra O(N) scan.
+    """
+    if not requested_type or requested_type in present_types:
+        return []
+    present = sorted(t for t in present_types if t not in (None, ""))
+    return [
+        f"{field}={requested_type!r} matched nothing; this graph has types: "
+        f"{', '.join(present) if present else '(none)'}"
+    ]
+
+
 def format_graph_response(graph_type: str, query: Dict, results: Dict,
-                          warnings: List[str] = None, truncated: bool = False) -> Dict:
+                          warnings: Optional[List[str]] = None, truncated: bool = False) -> Dict:
     """Format response in standard graph tool response format."""
     return {
         "graph": graph_type,
