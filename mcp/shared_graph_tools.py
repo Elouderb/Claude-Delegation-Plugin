@@ -18,6 +18,22 @@ from graph_io import (
     type_filter_warning,
 )
 
+# --- Phase 1b event emission (best-effort; a failed emit never fails a tool) --
+# Reaches the outbox through the SHARED, tri-state ``graph_io.get_outbox()`` probe
+# (one copy for card + graph tools) and emits against ``graph_io.emission_repo_
+# root()`` — the SAME single-source repo root card_tools uses — so a repo's graph
+# and card events never split across two outboxes.
+def _emit_graph_event(emit_method: str) -> None:
+    """Emit a graph-refresh event (best-effort; never raises to the caller)."""
+    try:
+        ob = graph_io.get_outbox()
+        root = graph_io.emission_repo_root()
+        if ob is None or root is None:
+            return
+        getattr(ob, emit_method)(root)
+    except Exception as exc:  # a failed emit must never fail a graph tool
+        log(f"event emission skipped ({emit_method}): {exc}")
+
 
 def graph_search_nodes(query: str, graph: str = "code", node_type: Optional[str] = None,
                        fuzzy: bool = False, limit: int = 50) -> dict:
@@ -309,6 +325,7 @@ def graph_refresh(graph: str = "code") -> dict:
         if graph == "database":
             success, error = refresh_database_graph()
             if success:
+                _emit_graph_event("emit_db_graph_updated")
                 return format_graph_response("database", {}, {"status": "refreshed"})
             else:
                 return format_graph_response("database", {}, {},
@@ -337,6 +354,7 @@ def graph_refresh(graph: str = "code") -> dict:
                     env=child_env,
                     timeout=120,
                 )
+                _emit_graph_event("emit_repo_graph_updated")
                 return format_graph_response("code", {}, {"status": "refreshed"})
             except subprocess.CalledProcessError as e:
                 return format_graph_response("code", {}, {}, [e.stderr])

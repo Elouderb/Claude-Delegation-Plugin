@@ -24,6 +24,7 @@ from typing import Optional, Union
 import sqlite3
 import uuid
 
+import graph_io
 from graph_io import log
 
 # Allowed card lifecycle states
@@ -32,6 +33,50 @@ VALID_STATUSES = ("Created", "In Progress", "Complete")
 # Path to the repo-local card database, injected by server.py after it has
 # resolved the repo root.  ``None`` until the server initialises.
 _db_path: Optional[Path] = None
+
+
+# --- Phase 1b event emission (best-effort, never breaks a card op) -----------
+# The top-level ``outbox`` package is reached through the SHARED, tri-state
+# ``graph_io.get_outbox()`` probe (one copy for card + graph tools), and the
+# emission repo root through ``graph_io.emission_repo_root()`` — the SINGLE
+# source of truth so card events and graph events for one repo always land in the
+# same outbox. Emission itself swallows all errors and no-ops when identity is
+# not bootstrapped, so a card create/update/complete can never fail because of
+# the outbox; ``_emit_task_event`` adds a belt-and-braces guard so even an
+# unexpected error in the emission plumbing can't turn a committed card into a
+# reported failure.
+
+
+def _repo_root() -> Optional[Path]:
+    """Repo root inferred from the card DB path (``<repo>/.agent-os/cards.sqlite``).
+
+    Used as the fallback source for :func:`graph_io.emission_repo_root` — in the
+    running server this equals the server-set emission root (both derive from the
+    same resolved repo_root), so card and graph emission agree.
+    """
+    if _db_path is None:
+        return None
+    return _db_path.parent.parent
+
+
+def _emit_task_event(emit_method: str, *, card_id, title, status, priority) -> None:
+    """Emit one task lifecycle event (best-effort; never raises to the caller).
+
+    Single helper for the three previously copy-pasted emission blocks
+    (create/update/complete). Resolves the outbox + the shared emission repo root,
+    no-ops if either is unavailable, and swallows any error so a card write is
+    never reported as a failure because of the outbox.
+    """
+    try:
+        ob = graph_io.get_outbox()
+        root = graph_io.emission_repo_root(fallback=_repo_root())
+        if ob is None or root is None:
+            return
+        getattr(ob, emit_method)(
+            root, card_id=card_id, title=title, status=status, priority=priority
+        )
+    except Exception as exc:  # defense-in-depth: emit must never fail a card op
+        log(f"event emission skipped ({emit_method}): {exc}")
 
 
 def set_db_path(path: Optional[Union[str, Path]]) -> None:
@@ -110,6 +155,11 @@ def create_card(title: str, description: Optional[str] = None, priority: str = "
             """, (card_id, title, description, "Created", priority, now, now))
 
         log(f"Created card {card_id}: {title}")
+
+        _emit_task_event(
+            "emit_task_created", card_id=card_id, title=title,
+            status="Created", priority=priority,
+        )
 
         return {
             "card_id": card_id,
@@ -222,7 +272,19 @@ def update_card(card_id: str, title: Optional[str] = None,
         log(f"Updated card {card_id}")
 
         # Return updated card (opens its own short-lived connection)
-        return get_card(card_id)
+        result = get_card(card_id)
+
+        # Emit task.updated from the fresh card state (covers status transitions).
+        if isinstance(result, dict) and "error" not in result:
+            _emit_task_event(
+                "emit_task_updated",
+                card_id=card_id,
+                title=result.get("title"),
+                status=result.get("status"),
+                priority=result.get("priority"),
+            )
+
+        return result
     except Exception as e:
         log(f"ERROR updating card {card_id}: {e}")
         return {"error": f"Failed to update card: {str(e)}"}
@@ -277,8 +339,20 @@ def complete_card(card_id: str, completion_summary: str) -> dict:
         # Add completion summary as final comment
         add_comment(card_id, "system", f"Completion: {completion_summary}")
 
-        # Update status
+        # Update status. Note: update_card emits task.updated(status=Complete) for
+        # the transition; we additionally emit task.completed here so a consumer
+        # sees both the status transition and the completion marker (both truthful).
         result = update_card(card_id, status="Complete")
+
+        if isinstance(result, dict) and "error" not in result:
+            _emit_task_event(
+                "emit_task_completed",
+                card_id=card_id,
+                title=result.get("title"),
+                status=result.get("status"),
+                priority=result.get("priority"),
+            )
+
         log(f"Card {card_id} marked as Complete")
         return result
     except Exception as e:

@@ -23,6 +23,12 @@ def test_task_cards():
     # Use a temporary directory for testing
     test_dir = tempfile.mkdtemp(prefix="task_cards_test_")
     original_cwd = os.getcwd()
+    # Point the machine-global Agent OS home at a temp dir so ensure_agent_os()'s
+    # Phase 1b identity bootstrap never mints/pollutes the REAL ~/.agent-os
+    # (mirrors the AGENT_OS_MEMORY_HOME test-isolation precedent).
+    home_dir = tempfile.mkdtemp(prefix="task_cards_home_")
+    original_home = os.environ.get("AGENT_OS_HOME")
+    os.environ["AGENT_OS_HOME"] = home_dir
 
     try:
         os.chdir(test_dir)
@@ -124,7 +130,12 @@ def test_task_cards():
 
     finally:
         os.chdir(original_cwd)
+        if original_home is None:
+            os.environ.pop("AGENT_OS_HOME", None)
+        else:
+            os.environ["AGENT_OS_HOME"] = original_home
         shutil.rmtree(test_dir, ignore_errors=True)
+        shutil.rmtree(home_dir, ignore_errors=True)
 
 
 if __name__ == "__main__":

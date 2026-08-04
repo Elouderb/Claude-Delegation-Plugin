@@ -11,6 +11,16 @@ import time
 from pathlib import Path
 from typing import Any
 
+# Put the REPO ROOT on sys.path so the top-level ``contracts`` and ``outbox``
+# packages import by bare name from every hook script. hook_common is imported
+# first by each hook (sync_repo_graph.py, etc.), so this one insert covers the
+# whole scripts/ entry path — the same convention mcp/server.py and the test
+# suite use. Guarded ``import outbox`` at the use sites keeps a checkout without
+# the packages fully functional (event emission just no-ops).
+_REPO_ROOT = Path(__file__).resolve().parent.parent
+if str(_REPO_ROOT) not in sys.path:
+    sys.path.insert(0, str(_REPO_ROOT))
+
 SOURCE_EXTENSIONS = {
     ".py", ".pyi", ".js", ".jsx", ".ts", ".tsx", ".mjs", ".cjs",
     ".java", ".kt", ".kts", ".go", ".rs", ".c", ".h", ".cpp", ".hpp",
@@ -158,6 +168,67 @@ def mark_dirty(root: Path, reason: str) -> None:
         encoding="utf-8",
     )
     log(root, f"marked dirty: {reason}")
+
+
+# --- Phase 1b: identity bootstrap + lifecycle event emission (hook entry) -----
+# These are the hook-side counterpart to mcp/server.py's startup bootstrap. Every
+# call is guarded so a checkout missing the top-level ``outbox``/``contracts``
+# packages (or their pydantic dependency) leaves the hooks fully functional —
+# identity is simply not stamped and no events are emitted. On the hot path
+# bootstrap is two small file reads once identity exists (the git-remote probe is
+# first-run only), and emission is a single small append at real lifecycle
+# points only.
+def bootstrap_identity(root: Path) -> None:
+    """Idempotently ensure machine + repository identity exists (best-effort)."""
+    try:
+        import outbox
+        outbox.bootstrap_identity(root)
+    except Exception:
+        pass
+
+
+# Hook --reason -> agent lifecycle event. Only these REAL existing hook points
+# emit agent events; the graph-sync reasons (prompt-submit, bash-tool,
+# tool-batch, turn-stop) do not. No new hooks are registered.
+_LIFECYCLE_REASONS = frozenset({"session-start", "subagent-stop", "session-end"})
+
+
+def is_lifecycle_reason(reason: str) -> bool:
+    """True iff ``reason`` is a hook point that emits an agent lifecycle event.
+
+    The single gate shared by the hook entry (``sync_repo_graph``) and
+    :func:`emit_lifecycle_event`, so identity bootstrap + emission are paid ONLY
+    on session-start / subagent-stop / session-end — never on the hot
+    prompt-submit / bash-tool / tool-batch / turn-stop reasons that fire on every
+    turn (card ce79a987 finding 2: those reasons emit nothing, so importing
+    contracts/pydantic to bootstrap identity there is pure ~300 ms latency tax).
+    """
+    return reason in _LIFECYCLE_REASONS
+
+
+def emit_lifecycle_event(root: Path, reason: str, payload: dict[str, Any]) -> None:
+    """Emit the agent lifecycle event for a hook ``reason`` (best-effort).
+
+    Context available from the Claude Code hook payload: ``session_id`` (all
+    hooks) and, for SessionStart, ``source`` (startup/resume/clear/compact). The
+    subagent TYPE is NOT present in the current SubagentStop payload, so
+    ``agent_id`` stays null; the event records the reason and scope. A no-op for
+    non-lifecycle reasons or when the outbox package is unavailable.
+    """
+    if reason not in _LIFECYCLE_REASONS:
+        return
+    try:
+        import outbox
+    except Exception:
+        return
+    session_id = payload.get("session_id") if isinstance(payload, dict) else None
+    if reason == "session-start":
+        source = payload.get("source") if isinstance(payload, dict) else None
+        outbox.emit_agent_started(root, session_id=session_id, source=source, reason=reason)
+    elif reason == "subagent-stop":
+        outbox.emit_agent_finished(root, session_id=session_id, reason=reason, scope="subagent")
+    elif reason == "session-end":
+        outbox.emit_agent_finished(root, session_id=session_id, reason=reason, scope="session")
 
 def git_state_fingerprint(root: Path) -> str:
     """
