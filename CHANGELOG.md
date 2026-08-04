@@ -4,6 +4,19 @@ All notable changes to the **agent-os** plugin are documented here. The format i
 based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/), and this project
 adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Fixed
+- **Windows: the memory extra no longer breaks `install.ps1`.**
+  `mcp/memory_requirements.txt` pinned `pysqlite3-binary` bare, but that
+  package ships Linux-only wheels — installing the central-memory extra on
+  Windows failed with "No matching distribution found" (M2 field report,
+  2026-08-04). The pin is now Linux-marked (`; sys_platform == "linux"`);
+  on Windows the memory store uses the stdlib `sqlite3` (python.org builds
+  are loadable-extension-capable, and `mcp/memory/availability.py` already
+  falls back automatically). CI now dry-run-resolves every optional extras
+  file on both platforms so a platform-broken pin fails the matrix.
+
 ## [0.2.8] - 2026-08-03
 
 ### Fixed

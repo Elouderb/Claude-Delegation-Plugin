@@ -78,6 +78,19 @@ jobs:
         shell: bash
         run: $VENV_PY -m pip install --quiet -r dev-requirements.txt
 
+      # Every OPTIONAL extras file must at least RESOLVE on both platforms,
+      # without installing it (--dry-run) or pulling heavy dependency trees
+      # (--no-deps). Guards against platform-broken pins: a bare
+      # pysqlite3-binary pin in memory_requirements.txt shipped Linux-only
+      # wheels and broke `install.ps1` with the memory extra on a real
+      # Windows machine (M2 field report, 2026-08-04). This step would have
+      # caught it on the windows-latest leg.
+      - name: Extras requirement files resolve on this platform
+        shell: bash
+        run: |
+          $VENV_PY -m pip install --quiet --dry-run --no-deps \
+            -r mcp/memory_requirements.txt -r mcp/db_requirements.txt
+
       - name: Run test suite
         shell: bash
         # Linux: ~335 passed / 1 skipped (the db_* SQL-Server-gated test).
