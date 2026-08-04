@@ -1,0 +1,148 @@
+{
+  "$defs": {
+    "AgentStatus": {
+      "description": "Coarse agent-session lifecycle state (aligns with the ``agent.*`` events).",
+      "enum": [
+        "starting",
+        "running",
+        "waiting",
+        "failed",
+        "finished"
+      ],
+      "title": "AgentStatus",
+      "type": "string"
+    }
+  },
+  "description": "A registered agent session (proposal \u00a711.3).\n\nCaptures the identity/topology of the session (agent, session, machine,\nrepository, parent agent), its declared ``capabilities``, the ``current_task``\nit is working on (if any), its ``status`` and last ``heartbeat_at``, its\n``runtime`` (model/runtime string), and its ``started_at`` /\n``expected_expiration_at`` bounds.",
+  "properties": {
+    "agent_id": {
+      "description": "Prefixed ULID for the agent (agent_...).",
+      "title": "Agent Id",
+      "type": "string"
+    },
+    "agent_type": {
+      "description": "Specialist role, e.g. 'implementer'.",
+      "title": "Agent Type",
+      "type": "string"
+    },
+    "capabilities": {
+      "description": "Declared capabilities as open dot-namespaced strings (Capability registry values today; unknown domain.verb strings accepted so a newer agent's registration still parses on an older build).",
+      "items": {
+        "pattern": "^[a-z][a-z0-9_]*(\\.[a-z][a-z0-9_]*)+$",
+        "type": "string"
+      },
+      "title": "Capabilities",
+      "type": "array"
+    },
+    "current_task_id": {
+      "anyOf": [
+        {
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Current Task Id"
+    },
+    "expected_expiration_at": {
+      "anyOf": [
+        {
+          "format": "date-time",
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "description": "When the session is expected to expire (UTC).",
+      "title": "Expected Expiration At"
+    },
+    "heartbeat_at": {
+      "anyOf": [
+        {
+          "format": "date-time",
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "description": "Last liveness heartbeat (UTC).",
+      "title": "Heartbeat At"
+    },
+    "machine_id": {
+      "title": "Machine Id",
+      "type": "string"
+    },
+    "parent_agent_id": {
+      "anyOf": [
+        {
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "description": "Spawning agent's id, if this is a subagent.",
+      "title": "Parent Agent Id"
+    },
+    "repository_id": {
+      "anyOf": [
+        {
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Repository Id"
+    },
+    "runtime": {
+      "anyOf": [
+        {
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "description": "Model / runtime identifier, e.g. 'claude-opus'.",
+      "title": "Runtime"
+    },
+    "schema_version": {
+      "default": 1,
+      "title": "Schema Version",
+      "type": "integer"
+    },
+    "session_id": {
+      "description": "Prefixed ULID for the session (sess_...).",
+      "title": "Session Id",
+      "type": "string"
+    },
+    "started_at": {
+      "format": "date-time",
+      "title": "Started At",
+      "type": "string"
+    },
+    "status": {
+      "$ref": "#/$defs/AgentStatus",
+      "default": "starting"
+    }
+  },
+  "required": [
+    "agent_id",
+    "session_id",
+    "agent_type",
+    "machine_id",
+    "started_at"
+  ],
+  "title": "AgentRegistration",
+  "type": "object"
+}

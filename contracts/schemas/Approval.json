@@ -1,0 +1,75 @@
+{
+  "description": "An approval/rejection of a requested action (proposal \u00a711.1 / \u00a712.3).\n\nNot an :class:`ArtifactBase`: an approval is authored by an ``approver``\n(a user/policy, not an agent) and references a ``decision_request_id`` rather\nthan a task, so it carries neither the ``author_agent`` nor the ``task_id``\nhead.",
+  "properties": {
+    "approver": {
+      "description": "Approving user or policy id.",
+      "title": "Approver",
+      "type": "string"
+    },
+    "artifact_id": {
+      "title": "Artifact Id",
+      "type": "string"
+    },
+    "artifact_type": {
+      "const": "approval",
+      "default": "approval",
+      "title": "Artifact Type",
+      "type": "string"
+    },
+    "decided_at": {
+      "format": "date-time",
+      "title": "Decided At",
+      "type": "string"
+    },
+    "decision": {
+      "enum": [
+        "approved",
+        "rejected"
+      ],
+      "title": "Decision",
+      "type": "string"
+    },
+    "decision_request_id": {
+      "anyOf": [
+        {
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Decision Request Id"
+    },
+    "reason": {
+      "anyOf": [
+        {
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Reason"
+    },
+    "requested_action": {
+      "title": "Requested Action",
+      "type": "string"
+    },
+    "schema_version": {
+      "default": 1,
+      "title": "Schema Version",
+      "type": "integer"
+    }
+  },
+  "required": [
+    "artifact_id",
+    "decision",
+    "requested_action",
+    "approver",
+    "decided_at"
+  ],
+  "title": "Approval",
+  "type": "object"
+}

@@ -1,0 +1,38 @@
+{
+  "description": "Stable identity of a single machine (ruling 4).",
+  "properties": {
+    "created_at": {
+      "format": "date-time",
+      "title": "Created At",
+      "type": "string"
+    },
+    "machine_id": {
+      "description": "Prefixed ULID for the machine (mach_...).",
+      "title": "Machine Id",
+      "type": "string"
+    },
+    "name": {
+      "description": "Human-friendly machine name (e.g. hostname).",
+      "title": "Name",
+      "type": "string"
+    },
+    "os": {
+      "description": "Operating system, e.g. 'Linux' / 'Windows'.",
+      "title": "Os",
+      "type": "string"
+    },
+    "schema_version": {
+      "default": 1,
+      "title": "Schema Version",
+      "type": "integer"
+    }
+  },
+  "required": [
+    "machine_id",
+    "name",
+    "os",
+    "created_at"
+  ],
+  "title": "MachineIdentity",
+  "type": "object"
+}

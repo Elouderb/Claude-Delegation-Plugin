@@ -1,0 +1,33 @@
+{
+  "description": "An evidence-bearing assertion (proposal \u00a711.2).\n\n``confidence`` is in [0, 1]; ``evidence`` holds reference strings such as\n``dbgraph://CustomerOrder/CustomerId`` or ``event:...`` locating the support.",
+  "properties": {
+    "confidence": {
+      "maximum": 1.0,
+      "minimum": 0.0,
+      "title": "Confidence",
+      "type": "number"
+    },
+    "evidence": {
+      "items": {
+        "type": "string"
+      },
+      "title": "Evidence",
+      "type": "array"
+    },
+    "schema_version": {
+      "default": 1,
+      "title": "Schema Version",
+      "type": "integer"
+    },
+    "statement": {
+      "title": "Statement",
+      "type": "string"
+    }
+  },
+  "required": [
+    "statement",
+    "confidence"
+  ],
+  "title": "Claim",
+  "type": "object"
+}

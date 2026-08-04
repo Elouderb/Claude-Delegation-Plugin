@@ -10,7 +10,12 @@ A repository-local "operating system" for agentic development in Claude Code, pa
 | **Graph query tools** | `mcp/server.py` | 18 read-oriented MCP tools over the Graphify code graph and the database graph. |
 | **Central memory tools** | `mcp/memory_tools.py` | 3 optional tools (`memory_ingest`, `memory_query`, `memory_status`) over a machine-global sqlite-vec + FTS5 corpus. Degrades gracefully when its extras are absent (see below). |
 | **Database graph builder** | `mcp/db_tools/` | Builds a graph of a Microsoft SQL Server schema (`build_db_graph.py` + `build_graph_html.py`). Optional; requires a SQL Server connection. |
-| **Graph-sync hooks** | `hooks/hooks.json`, `scripts/` | Keep the repository graph fresh and protect generated files. See `hooks/README.md`. |
+| **Architecture contracts** | `contracts/` | Phase 0 typed contract models (pydantic v2) for events, agents, tasks/sync, memory, capabilities, and context, plus stable machine/repo identity and committed JSON Schemas (`contracts/schemas/*.json`). See [`docs/architecture/CONTRACTS.md`](docs/architecture/CONTRACTS.md). |
+| **Local sync outbox** | `outbox/` | Phase 1b offline event plane: identity bootstrap plus a durable append-only `.agent-os/sync/outbox.jsonl` of validated `EventEnvelope`s emitted at the plugin's existing lifecycle points (card create/update/complete, graph refresh, session/subagent hooks). Draining to the central store is done by the Phase 1c drain worker (`outbox/drain.py`); `AGENT_OS_EVENTS_DISABLED=1` disables emission entirely. |
+| **Central store migrations** | `database/` | Phase 1a versioned SQL migrations + a stdlib/pyodbc runner that stand up the `registry.*` / `ops.*` schema in the central SQL Server database (`agent_os_memory`). Optional; requires `pyodbc` + a connection string. See [`database/README.md`](database/README.md). |
+| **Central Agent OS API + drain** | `services/api/`, `outbox/drain.py` | Phase 1c `/v1` HTTP API in front of the central store (machine/repo/session registration, heartbeats, idempotent event ingestion, read endpoints, `GET/PUT /v1/sync/{client_id}` replay cursors) plus the drain worker that ships outbox events to it. Bearer-auth (`AGENT_OS_API_KEY`); `python -m services.api` / `python -m outbox.drain [--once]`. The drain can also run as a server-spawned companion, OFF by default (opt in with `AGENT_OS_SYNC=1`). See [`services/README.md`](services/README.md). |
+| **M3 stand-in client** | `services/m3_client/` | Phase 1d read-only terminal client playing Machine 3's role until the real M3 VM exists: `python -m services.m3_client status [--json] [--follow]` renders machines/repositories/active sessions/recent events from the `/v1` API, with a gap-free `--follow` keyset walk and `--client-id`-scoped resume position. Stdlib-only end to end (no `contracts`/`pydantic`/`python-dotenv`) so it can eventually run standalone on a bare-Python M3 VM. See [`services/README.md`](services/README.md). |
+| **Graph-sync hooks** | `hooks/hooks.json`, `scripts/` | Keep the repository graph fresh, protect generated files, and (Phase 1b) emit agent lifecycle events at real hook points (session-start / subagent-stop / session-end). See `hooks/README.md`. |
 | **Agents** | `agents/` | `implementer`, `complex-implementer` (opus / high-effort, for repo-wide or complex changes), `frontend-engineer` (UI), `codebase-consultant` (read-only repo investigator other agents can delegate to), `code-reviewer`, `security-reviewer`, `test-engineer`, `verification-engineer` (runs the real app / browser), `database-engineer`, `research-planner`. |
 | **Skills** | `skills/` | 24 workflow skills for cards, planning, review, testing, codebase investigation, verification, and graph discipline. |
 
@@ -184,6 +189,21 @@ Cards are repository-local: each repo gets its own `.agent-os/cards.sqlite`, dis
 - `INTEGRATION.md` — project setup and workflow rules.
 - `hooks/README.md` — how the graph-sync hooks behave.
 - `CHANGELOG.md` — change history.
+
+### Architecture / where the plan lives
+
+The long-term buildout of Agent OS into a distributed control/execution system
+is described in [`docs/architecture/PROPOSAL.md`](docs/architecture/PROPOSAL.md)
+(moved from the repo root). Phase 0 ships stable, typed **contracts** — pydantic
+v2 models plus committed JSON Schemas — in the top-level `contracts/` package:
+
+- [`docs/architecture/CONTRACTS.md`](docs/architecture/CONTRACTS.md) — contract
+  models, prefixed-ULID identifiers, identity files, capability/versioning rules.
+- [`docs/architecture/EVENTS.md`](docs/architecture/EVENTS.md) — the event
+  envelope and taxonomy, and the CloudEvents mapping decision.
+
+Run `python -m contracts.examples` to print one valid example payload per model,
+or `python -m contracts.generate_schemas --check` to verify the committed schemas.
 
 ## Testing
 

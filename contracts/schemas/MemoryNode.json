@@ -1,0 +1,142 @@
+{
+  "$defs": {
+    "MemoryApprovalState": {
+      "description": "Lifecycle state of a memory node/candidate (proposal \u00a78.4).",
+      "enum": [
+        "extracted",
+        "candidate",
+        "linked",
+        "verified",
+        "accepted",
+        "rejected",
+        "superseded",
+        "stale"
+      ],
+      "title": "MemoryApprovalState",
+      "type": "string"
+    }
+  },
+  "description": "A synthesized memory node (proposal \u00a74.3).\n\n``node_type`` and ``canonical_name`` name the concept; ``summary`` states it;\n``scope`` places it (project vs global) and ``project_id`` / ``repository_id``\nsay *which* project/repo it belongs to (a ``scope='project'`` node is\nmeaningless without knowing the project); ``confidence`` and ``stability``\nrate it; ``approval_state`` tracks its lifecycle; ``evidence`` carries the\nprovenance refs that support the node.\n\n``evidence`` uses the same free-form reference-string convention as\n:class:`~contracts.artifacts.Claim` / :class:`~contracts.artifacts.MemoryProposal`\n\u2014 e.g. ``dbgraph://CustomerOrder/CustomerId``, ``event:evt_01J...``,\n``chunk:...`` \u2014 locating the chunks or events the node was derived from.\nProvenance captured at write time is unrecoverable if lost, so the ref list\nexists from day one; the remaining \u00a74.4 provenance facets\n(source version, contradiction state, access policy, \u2026) are layered on\nadditively in later phases.",
+  "properties": {
+    "approval_state": {
+      "$ref": "#/$defs/MemoryApprovalState",
+      "default": "candidate"
+    },
+    "canonical_name": {
+      "title": "Canonical Name",
+      "type": "string"
+    },
+    "confidence": {
+      "maximum": 1.0,
+      "minimum": 0.0,
+      "title": "Confidence",
+      "type": "number"
+    },
+    "created_at": {
+      "format": "date-time",
+      "title": "Created At",
+      "type": "string"
+    },
+    "created_by": {
+      "description": "Authoring agent/principal id.",
+      "title": "Created By",
+      "type": "string"
+    },
+    "evidence": {
+      "description": "Provenance reference strings (\u00a74.4) supporting this node.",
+      "items": {
+        "type": "string"
+      },
+      "title": "Evidence",
+      "type": "array"
+    },
+    "last_verified_at": {
+      "anyOf": [
+        {
+          "format": "date-time",
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Last Verified At"
+    },
+    "node_id": {
+      "description": "Prefixed ULID for the node (mem_...).",
+      "title": "Node Id",
+      "type": "string"
+    },
+    "node_type": {
+      "description": "Concept type, e.g. 'architectural_pattern'.",
+      "title": "Node Type",
+      "type": "string"
+    },
+    "project_id": {
+      "anyOf": [
+        {
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "description": "Owning project id (proj_...) for a project-scoped node.",
+      "title": "Project Id"
+    },
+    "repository_id": {
+      "anyOf": [
+        {
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "description": "Owning repository id (repo_...), when the node is repo-specific.",
+      "title": "Repository Id"
+    },
+    "schema_version": {
+      "default": 1,
+      "title": "Schema Version",
+      "type": "integer"
+    },
+    "scope": {
+      "default": "project",
+      "enum": [
+        "project",
+        "global"
+      ],
+      "title": "Scope",
+      "type": "string"
+    },
+    "stability": {
+      "default": "medium",
+      "enum": [
+        "low",
+        "medium",
+        "high"
+      ],
+      "title": "Stability",
+      "type": "string"
+    },
+    "summary": {
+      "title": "Summary",
+      "type": "string"
+    }
+  },
+  "required": [
+    "node_id",
+    "node_type",
+    "canonical_name",
+    "summary",
+    "confidence",
+    "created_by",
+    "created_at"
+  ],
+  "title": "MemoryNode",
+  "type": "object"
+}

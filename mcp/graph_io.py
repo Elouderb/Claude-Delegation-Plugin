@@ -250,6 +250,69 @@ def get_repo_root() -> Path:
     return current_dir
 
 
+# --- Phase 1b: shared event-emission plumbing (one copy for card + graph tools) ---
+# ``get_outbox`` is the SINGLE tri-state guarded probe for the top-level
+# ``outbox`` package, shared by card_tools and shared_graph_tools (previously two
+# byte-identical copies). It caches BOTH outcomes: a successful import, and a
+# failure (``None``) — so a checkout genuinely missing the package does not pay a
+# failed import on every card/graph op forever. The running server puts the repo
+# root on sys.path before these tool modules load, so the import resolves there;
+# a context that never adds it stays a clean no-op. (scripts/hook_common keeps its
+# own inline guard: scripts/ must not import mcp/ — a layering boundary — so a
+# single cross-package helper is intentionally not attempted here.)
+_UNSET_OUTBOX = object()
+_outbox_cache: object = _UNSET_OUTBOX
+
+
+def get_outbox():
+    """Return the ``outbox`` module if importable, else ``None`` (tri-state cache)."""
+    global _outbox_cache
+    if _outbox_cache is not _UNSET_OUTBOX:
+        return _outbox_cache
+    try:
+        import outbox as _mod
+    except Exception:
+        _outbox_cache = None
+        return None
+    _outbox_cache = _mod
+    return _mod
+
+
+def _reset_outbox_cache_for_tests() -> None:
+    """Clear the tri-state outbox import cache (test-only hook)."""
+    global _outbox_cache
+    _outbox_cache = _UNSET_OUTBOX
+
+
+# The single source of truth for the repo root that event emission stamps onto
+# events. Set once by server.ensure_agent_os() to the SAME repo_root that identity
+# was bootstrapped under, so card events and graph events for one repo can never
+# be split across two outboxes by a cwd that differs from the card-DB repo
+# (worktree / launched-elsewhere). card_tools and shared_graph_tools both emit
+# against emission_repo_root().
+_emission_repo_root: Optional[Path] = None
+
+
+def set_emission_repo_root(root: Optional[Path]) -> None:
+    """Record the repo root identity was bootstrapped under (server startup)."""
+    global _emission_repo_root
+    _emission_repo_root = Path(root) if root is not None else None
+
+
+def emission_repo_root(fallback: Optional[Path] = None) -> Optional[Path]:
+    """Repo root for event-emission context (see :func:`set_emission_repo_root`).
+
+    Prefers the server-set root (the truthful, identity-bootstrapped one). When
+    the server has not set it (non-server / direct-import contexts), uses
+    ``fallback`` if given, else the cwd ``.git``-walk :func:`get_repo_root`.
+    """
+    if _emission_repo_root is not None:
+        return _emission_repo_root
+    if fallback is not None:
+        return fallback
+    return get_repo_root()
+
+
 def find_db_tools_dir() -> Optional[Path]:
     """Locate the db_tools directory containing the graph build scripts.
 
@@ -475,6 +538,16 @@ def load_database_graph() -> Optional[Dict[str, Any]]:
     try:
         from graph_server import _check_graph_server_health
         _check_graph_server_health()
+        # Low-frequency companion-health touchpoint: also poll the outbox drain
+        # (a non-blocking Popen.poll()) and respawn it if it crashed. Lazy import
+        # avoids a load-time cycle (sync_server imports graph_server + graph_io);
+        # guarded so a sync issue never breaks graph loading. No-op if AGENT_OS_SYNC
+        # is off / the drain was never spawned.
+        try:
+            import sync_server
+            sync_server.check_sync_worker_health()
+        except Exception:
+            pass
         repo_root = get_repo_root()
         graph_path = repo_root / ".agent-os" / "db" / "db_graph.json"
 
@@ -528,6 +601,16 @@ def load_code_graph() -> Optional[Dict[str, Any]]:
     try:
         from graph_server import _check_graph_server_health
         _check_graph_server_health()
+        # Low-frequency companion-health touchpoint: also poll the outbox drain
+        # (a non-blocking Popen.poll()) and respawn it if it crashed. Lazy import
+        # avoids a load-time cycle (sync_server imports graph_server + graph_io);
+        # guarded so a sync issue never breaks graph loading. No-op if AGENT_OS_SYNC
+        # is off / the drain was never spawned.
+        try:
+            import sync_server
+            sync_server.check_sync_worker_health()
+        except Exception:
+            pass
         repo_root = get_repo_root()
         graph_path = repo_root / "graphify-out" / "graph.json"
 

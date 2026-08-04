@@ -233,5 +233,44 @@ class TestRefreshGraphifyLockBehavior(unittest.TestCase):
         self.assertFalse(lock.exists())
 
 
+class TestGeneratedFileProtection(unittest.TestCase):
+    """is_generated_in_repo() protects committed generated artifacts.
+
+    contracts/schemas/*.json are generated from the pydantic models; hand-edits
+    are blocked inside the plugin's own repo (detected by templates/mcp.json.tmpl)
+    but not in a consuming repo.
+    """
+
+    def _plugin_root(self):
+        import shutil
+        tmpdir = Path(tempfile.mkdtemp(prefix="agent_os_pluginrepo_"))
+        self.addCleanup(shutil.rmtree, tmpdir, True)
+        (tmpdir / "templates").mkdir(parents=True)
+        (tmpdir / "templates" / "mcp.json.tmpl").write_text("{}", encoding="utf-8")
+        return tmpdir
+
+    def _plain_root(self):
+        import shutil
+        tmpdir = Path(tempfile.mkdtemp(prefix="agent_os_plainrepo_"))
+        self.addCleanup(shutil.rmtree, tmpdir, True)
+        return tmpdir
+
+    def test_schema_protected_in_plugin_repo(self):
+        root = self._plugin_root()
+        rel = Path("contracts/schemas/EventEnvelope.json")
+        self.assertTrue(hook_common.is_generated_in_repo(rel, root))
+
+    def test_schema_not_protected_in_consuming_repo(self):
+        root = self._plain_root()
+        rel = Path("contracts/schemas/EventEnvelope.json")
+        self.assertFalse(hook_common.is_generated_in_repo(rel, root))
+
+    def test_model_source_not_protected(self):
+        root = self._plugin_root()
+        # The models themselves ARE the source and must remain editable.
+        rel = Path("contracts/events.py")
+        self.assertFalse(hook_common.is_generated_in_repo(rel, root))
+
+
 if __name__ == "__main__":
     unittest.main()

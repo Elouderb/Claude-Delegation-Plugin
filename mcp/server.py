@@ -35,6 +35,16 @@ from typing import Optional
 
 from mcp.server.fastmcp import FastMCP
 
+# Put the REPO ROOT on sys.path so the top-level ``contracts`` and ``outbox``
+# packages (siblings of ``mcp/``) import by bare name from every mcp sub-module —
+# the same convention the test-suite uses (sys.path.insert of parents[2]). This
+# runs before the sub-modules below so their guarded ``import outbox`` resolves
+# in the running server; a checkout without the packages simply degrades to
+# no-op event emission (the imports there are guarded).
+_REPO_ROOT = Path(__file__).resolve().parent.parent
+if str(_REPO_ROOT) not in sys.path:
+    sys.path.insert(0, str(_REPO_ROOT))
+
 # Sub-modules (all non-relative so server.py runs as a plain script).
 import card_tools
 import code_graph_tools
@@ -43,6 +53,7 @@ import graph_io
 import graph_server
 import memory_tools
 import shared_graph_tools
+import sync_server
 
 # Re-export helpers so existing callers (e.g. test_server.py) can still do
 # ``server.log(...)`` or ``server.get_repo_root()``.
@@ -116,8 +127,30 @@ def ensure_agent_os():
         card_tools.init_db()
         log(f"Database ready (per-operation connections): {db_path}")
 
+        # Record the SINGLE source of truth for the event-emission repo root:
+        # the same repo_root identity is bootstrapped under, so card events and
+        # graph events for this repo always land in the same outbox (finding 4).
+        graph_io.set_emission_repo_root(repo_root)
+
+        # Bootstrap machine + repository identity (Phase 1b). Cheap and idempotent
+        # (identity helpers are atomic/self-healing); the git-remote probe runs
+        # only on a checkout's first ever bootstrap. Guarded end-to-end so a
+        # missing outbox/contracts package or a no-git checkout never blocks
+        # server startup — event emission simply no-ops without identity.
+        try:
+            import outbox
+            outbox.bootstrap_identity(repo_root)
+            log("Identity bootstrapped (machine + repository)")
+        except Exception as e:
+            log(f"Identity bootstrap skipped: {e}")
+
         # Start the graph server after database initialization
         start_graph_server()
+
+        # Start the outbox drain companion — OFF by default (AGENT_OS_SYNC=1 opts
+        # in). Spawned like the graph server (pdeathsig/respawn/log-file); a no-op
+        # unless enabled, so a stock install never phones home without consent.
+        sync_server.start_sync_worker(repo_root)
 
     except Exception as e:
         log(f"ERROR during database initialization: {e}")
@@ -131,6 +164,7 @@ def shutdown_db():
     long-lived card-database handle to close here.
     """
     graph_server.shutdown_flask()
+    sync_server.shutdown_sync_worker()
 
 
 # Register shutdown handler

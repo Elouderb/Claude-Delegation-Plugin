@@ -1,0 +1,81 @@
+{
+  "description": "A capability granted to a principal (proposal \u00a712).\n\nThe principal is identified by ``principal_type`` (``agent`` or ``machine``)\nand ``principal_id``.  ``scope`` optionally narrows the grant (e.g. a single\nrepository id); ``expires_at`` bounds it in time (``None`` = no expiry).",
+  "properties": {
+    "capability": {
+      "description": "Open dot-namespaced capability (e.g. 'repo.write'). A Capability registry value today; any well-formed domain.verb string tomorrow (default-deny keeps an unrecognised capability harmless).",
+      "pattern": "^[a-z][a-z0-9_]*(\\.[a-z][a-z0-9_]*)+$",
+      "title": "Capability",
+      "type": "string"
+    },
+    "expires_at": {
+      "anyOf": [
+        {
+          "format": "date-time",
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "description": "Grant expiry (UTC); None means no expiry.",
+      "title": "Expires At"
+    },
+    "grant_id": {
+      "description": "Prefixed ULID for this durable grant record (grant_...).",
+      "title": "Grant Id",
+      "type": "string"
+    },
+    "granted_at": {
+      "format": "date-time",
+      "title": "Granted At",
+      "type": "string"
+    },
+    "granted_by": {
+      "description": "Id of the principal or policy that issued the grant.",
+      "title": "Granted By",
+      "type": "string"
+    },
+    "principal_id": {
+      "description": "Id of the granted agent or machine.",
+      "title": "Principal Id",
+      "type": "string"
+    },
+    "principal_type": {
+      "enum": [
+        "agent",
+        "machine"
+      ],
+      "title": "Principal Type",
+      "type": "string"
+    },
+    "schema_version": {
+      "default": 1,
+      "title": "Schema Version",
+      "type": "integer"
+    },
+    "scope": {
+      "anyOf": [
+        {
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "description": "Optional scope narrowing the grant (e.g. a repository id).",
+      "title": "Scope"
+    }
+  },
+  "required": [
+    "grant_id",
+    "capability",
+    "principal_type",
+    "principal_id",
+    "granted_by",
+    "granted_at"
+  ],
+  "title": "CapabilityGrant",
+  "type": "object"
+}

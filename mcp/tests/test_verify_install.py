@@ -132,11 +132,18 @@ class TestHandshakeEndToEnd(unittest.TestCase):
 
             child_cwd = tmp_path / "cwd"
             child_cwd.mkdir()
+            # The spawned server runs ensure_agent_os(), whose Phase 1b identity
+            # bootstrap would otherwise mint/pollute the REAL ~/.agent-os. Point
+            # the child (which inherits os.environ) at a temp home.
+            child_home = tmp_path / "home"
+            child_home.mkdir()
 
             # Isolate the child's Flask graph server on a free port so it never
             # collides with a graph server already running on the default port.
             prev_port = os.environ.get("AGENT_OS_GRAPH_PORT")
+            prev_home = os.environ.get("AGENT_OS_HOME")
             os.environ["AGENT_OS_GRAPH_PORT"] = str(_free_port())
+            os.environ["AGENT_OS_HOME"] = str(child_home)
             try:
                 result = vi.verify(
                     mcp_json,
@@ -150,6 +157,10 @@ class TestHandshakeEndToEnd(unittest.TestCase):
                     os.environ.pop("AGENT_OS_GRAPH_PORT", None)
                 else:
                     os.environ["AGENT_OS_GRAPH_PORT"] = prev_port
+                if prev_home is None:
+                    os.environ.pop("AGENT_OS_HOME", None)
+                else:
+                    os.environ["AGENT_OS_HOME"] = prev_home
 
             detail = result.error or ""
             if not result.ok and result.stderr:

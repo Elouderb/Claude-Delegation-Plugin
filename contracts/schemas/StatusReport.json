@@ -1,0 +1,106 @@
+{
+  "$defs": {
+    "AgentStatus": {
+      "description": "Coarse agent-session lifecycle state (aligns with the ``agent.*`` events).",
+      "enum": [
+        "starting",
+        "running",
+        "waiting",
+        "failed",
+        "finished"
+      ],
+      "title": "AgentStatus",
+      "type": "string"
+    }
+  },
+  "description": "A periodic agent status/progress report (proposal \u00a711.1).",
+  "properties": {
+    "artifact_id": {
+      "title": "Artifact Id",
+      "type": "string"
+    },
+    "artifact_type": {
+      "const": "status_report",
+      "default": "status_report",
+      "title": "Artifact Type",
+      "type": "string"
+    },
+    "author_agent": {
+      "title": "Author Agent",
+      "type": "string"
+    },
+    "blockers": {
+      "items": {
+        "type": "string"
+      },
+      "title": "Blockers",
+      "type": "array"
+    },
+    "progress": {
+      "anyOf": [
+        {
+          "maximum": 1.0,
+          "minimum": 0.0,
+          "type": "number"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "description": "Fractional progress in [0, 1].",
+      "title": "Progress"
+    },
+    "reported_at": {
+      "format": "date-time",
+      "title": "Reported At",
+      "type": "string"
+    },
+    "schema_version": {
+      "default": 1,
+      "title": "Schema Version",
+      "type": "integer"
+    },
+    "session_id": {
+      "anyOf": [
+        {
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Session Id"
+    },
+    "status": {
+      "$ref": "#/$defs/AgentStatus"
+    },
+    "summary": {
+      "title": "Summary",
+      "type": "string"
+    },
+    "task_id": {
+      "anyOf": [
+        {
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "description": "Linked canonical task id (task_...), if any.",
+      "title": "Task Id"
+    }
+  },
+  "required": [
+    "artifact_id",
+    "author_agent",
+    "status",
+    "summary",
+    "reported_at"
+  ],
+  "title": "StatusReport",
+  "type": "object"
+}

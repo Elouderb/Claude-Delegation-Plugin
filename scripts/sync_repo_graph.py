@@ -4,9 +4,12 @@ import argparse
 import json
 
 from hook_common import (
+    bootstrap_identity,
     dirty_path,
+    emit_lifecycle_event,
     git_root,
     git_state_changed,
+    is_lifecycle_reason,
     mark_dirty,
     read_hook_input,
     refresh_graphify,
@@ -32,6 +35,18 @@ def main() -> int:
                 "additionalContext": "Agent OS: current directory is not inside a Git repository."
             }))
         return 0
+
+    # Phase 1b: on the REAL lifecycle hook points only (session-start ->
+    # agent.started; subagent-stop / session-end -> agent.finished), ensure
+    # identity exists and emit the event. The bootstrap is GATED on the lifecycle
+    # reason (finding 2): the hot reasons (prompt-submit/bash-tool/tool-batch/
+    # turn-stop, which fire every turn and emit nothing) must not pay the
+    # identity-bootstrap pydantic-import cost. emit_lifecycle_event self-gates too
+    # and returns before importing outbox for non-lifecycle reasons. Both are
+    # best-effort and independent of the graph refresh below.
+    if is_lifecycle_reason(args.reason):
+        bootstrap_identity(root)
+    emit_lifecycle_event(root, args.reason, payload)
 
     if args.check_git and git_state_changed(root):
         mark_dirty(root, f"Git/worktree state changed before {args.reason}")

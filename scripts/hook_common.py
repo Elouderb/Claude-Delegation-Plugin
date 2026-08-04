@@ -11,6 +11,16 @@ import time
 from pathlib import Path
 from typing import Any
 
+# Put the REPO ROOT on sys.path so the top-level ``contracts`` and ``outbox``
+# packages import by bare name from every hook script. hook_common is imported
+# first by each hook (sync_repo_graph.py, etc.), so this one insert covers the
+# whole scripts/ entry path — the same convention mcp/server.py and the test
+# suite use. Guarded ``import outbox`` at the use sites keeps a checkout without
+# the packages fully functional (event emission just no-ops).
+_REPO_ROOT = Path(__file__).resolve().parent.parent
+if str(_REPO_ROOT) not in sys.path:
+    sys.path.insert(0, str(_REPO_ROOT))
+
 SOURCE_EXTENSIONS = {
     ".py", ".pyi", ".js", ".jsx", ".ts", ".tsx", ".mjs", ".cjs",
     ".java", ".kt", ".kts", ".go", ".rs", ".c", ".h", ".cpp", ".hpp",
@@ -70,22 +80,39 @@ PLUGIN_GENERATED_FILES = (
     "hooks/hooks.json",
 )
 
+# Whole directories of generated-and-committed artifacts inside the plugin's OWN
+# repo. contracts/schemas/*.json are generated from the pydantic models by
+# `python -m contracts.generate_schemas`; hand-editing one would only be caught
+# later by the drift test, so block it at edit time and point the editor at the
+# models + generator instead. A consuming project has no contracts/schemas/, so
+# (like PLUGIN_GENERATED_FILES) this is gated on being the plugin repo.
+PLUGIN_GENERATED_PREFIXES = (
+    "contracts/schemas/",
+)
+
 def _is_plugin_repo(root: Path) -> bool:
     """True when ``root`` is the agent-os plugin's own repo — detected by the
     presence of the config template the installer generates .mcp.json from."""
     return (root / "templates" / "mcp.json.tmpl").is_file()
 
 def is_generated_in_repo(rel: Path, root: Path) -> bool:
-    """``is_generated`` plus the plugin-only generated launcher config.
+    """``is_generated`` plus the plugin-only generated launcher config + schemas.
 
     Inside the plugin's own repo, ``.mcp.json`` and ``hooks/hooks.json`` are
-    generated from ``templates/`` by the installer, so hand-edits should be
-    blocked (edit the template / generator instead). In a consuming repo those
-    files may be authored by hand, so they are NOT protected there.
+    generated from ``templates/`` by the installer, and ``contracts/schemas/*``
+    is generated from the pydantic models by ``contracts.generate_schemas``, so
+    hand-edits should be blocked (edit the source / generator instead). In a
+    consuming repo those files may be authored by hand (or do not exist), so they
+    are NOT protected there.
     """
     if is_generated(rel):
         return True
-    if rel.as_posix() in PLUGIN_GENERATED_FILES and _is_plugin_repo(root):
+    if not _is_plugin_repo(root):
+        return False
+    value = rel.as_posix()
+    if value in PLUGIN_GENERATED_FILES:
+        return True
+    if any(value.startswith(prefix) for prefix in PLUGIN_GENERATED_PREFIXES):
         return True
     return False
 
@@ -141,6 +168,67 @@ def mark_dirty(root: Path, reason: str) -> None:
         encoding="utf-8",
     )
     log(root, f"marked dirty: {reason}")
+
+
+# --- Phase 1b: identity bootstrap + lifecycle event emission (hook entry) -----
+# These are the hook-side counterpart to mcp/server.py's startup bootstrap. Every
+# call is guarded so a checkout missing the top-level ``outbox``/``contracts``
+# packages (or their pydantic dependency) leaves the hooks fully functional —
+# identity is simply not stamped and no events are emitted. On the hot path
+# bootstrap is two small file reads once identity exists (the git-remote probe is
+# first-run only), and emission is a single small append at real lifecycle
+# points only.
+def bootstrap_identity(root: Path) -> None:
+    """Idempotently ensure machine + repository identity exists (best-effort)."""
+    try:
+        import outbox
+        outbox.bootstrap_identity(root)
+    except Exception:
+        pass
+
+
+# Hook --reason -> agent lifecycle event. Only these REAL existing hook points
+# emit agent events; the graph-sync reasons (prompt-submit, bash-tool,
+# tool-batch, turn-stop) do not. No new hooks are registered.
+_LIFECYCLE_REASONS = frozenset({"session-start", "subagent-stop", "session-end"})
+
+
+def is_lifecycle_reason(reason: str) -> bool:
+    """True iff ``reason`` is a hook point that emits an agent lifecycle event.
+
+    The single gate shared by the hook entry (``sync_repo_graph``) and
+    :func:`emit_lifecycle_event`, so identity bootstrap + emission are paid ONLY
+    on session-start / subagent-stop / session-end — never on the hot
+    prompt-submit / bash-tool / tool-batch / turn-stop reasons that fire on every
+    turn (card ce79a987 finding 2: those reasons emit nothing, so importing
+    contracts/pydantic to bootstrap identity there is pure ~300 ms latency tax).
+    """
+    return reason in _LIFECYCLE_REASONS
+
+
+def emit_lifecycle_event(root: Path, reason: str, payload: dict[str, Any]) -> None:
+    """Emit the agent lifecycle event for a hook ``reason`` (best-effort).
+
+    Context available from the Claude Code hook payload: ``session_id`` (all
+    hooks) and, for SessionStart, ``source`` (startup/resume/clear/compact). The
+    subagent TYPE is NOT present in the current SubagentStop payload, so
+    ``agent_id`` stays null; the event records the reason and scope. A no-op for
+    non-lifecycle reasons or when the outbox package is unavailable.
+    """
+    if reason not in _LIFECYCLE_REASONS:
+        return
+    try:
+        import outbox
+    except Exception:
+        return
+    session_id = payload.get("session_id") if isinstance(payload, dict) else None
+    if reason == "session-start":
+        source = payload.get("source") if isinstance(payload, dict) else None
+        outbox.emit_agent_started(root, session_id=session_id, source=source, reason=reason)
+    elif reason == "subagent-stop":
+        outbox.emit_agent_finished(root, session_id=session_id, reason=reason, scope="subagent")
+    elif reason == "session-end":
+        outbox.emit_agent_finished(root, session_id=session_id, reason=reason, scope="session")
 
 def git_state_fingerprint(root: Path) -> str:
     """
