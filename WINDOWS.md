@@ -192,6 +192,68 @@ interpreter path in version-controlled config.
 
 ---
 
+## 6. Companion process lifecycle (graph server on :5000)
+
+**Symptom (M2 field report, 2026-08-04):** after `/reload-plugins` on Windows the
+old graph-server child survives, keeps port 5000 bound, and — in the worst case —
+the new MCP server's **card tools become inaccessible**.
+
+**Cause.** Two Windows gaps, now both fixed in `mcp/graph_server.py` /
+`mcp/sync_server.py` / `mcp/server.py`:
+
+1. *No kill-on-parent-exit.* The orphan-reaping used on Linux is
+   `PR_SET_PDEATHSIG`, which is Linux-only; Windows has no `preexec_fn` at all, so a
+   companion simply orphaned when the MCP server died. **Fixed** by assigning every
+   spawned companion (graph server *and* the optional sync worker) to a Windows
+   **Job Object** created with `JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE` (ctypes,
+   stdlib). The parent holds the job handle, so when it dies by *any* means the OS
+   closes the handle and kills the children. Requires Windows 8+ (nested jobs);
+   Win10+ is the target. On any failure it logs and continues (no crash).
+2. *Startup coupled to the companion.* A held/stale/foreign :5000 could delay or
+   break server startup and take the card tools down with it. **Fixed** by (a) fully
+   isolating companion startup from card-tool registration — card tools always
+   register and serve even if both companions fail — and (b) strictly time-bounded
+   stale-port recovery at spawn: a healthy agent-os server on the port is reused; our
+   own *wedged* server (identified via a per-port owner file + a `/health` nonce) is
+   terminated and the port reclaimed; a foreign process makes us relocate to the next
+   free port (unless `AGENT_OS_GRAPH_PORT` pins it, which we respect). Startup never
+   hangs on the port.
+
+### Hotfix for older installs (PowerShell)
+
+On a pre-fix install you may still find an orphaned process holding :5000 after a
+reload. To find and kill it (PowerShell 5.1+, no admin needed for your own
+processes):
+
+```powershell
+# Show what is listening on :5000, then kill it.
+Get-NetTCPConnection -LocalPort 5000 -State Listen |
+  Select-Object -ExpandProperty OwningProcess |
+  ForEach-Object { Stop-Process -Id $_ -Force }
+```
+
+`netstat`/`taskkill` fallback (any Windows, including where `Get-NetTCPConnection`
+is unavailable):
+
+```powershell
+netstat -ano | findstr :5000     # note the PID in the last column
+taskkill /PID <pid> /F
+```
+
+To sidestep the port entirely without killing anything, pin a different port for the
+session: `setx AGENT_OS_GRAPH_PORT 5051` (new shells) or `$env:AGENT_OS_GRAPH_PORT=5051`
+(current shell). The graph UI then serves from that port; card tools are unaffected
+either way.
+
+**Note for the maintainer:** the kill-on-parent-exit mechanism is unit-testable on
+the `windows-latest` CI leg (`mcp/tests/test_job_object.py` — spawn a child via the
+job helper, kill the parent, assert the child dies); it skips on POSIX, mirroring how
+`test_pdeathsig.py` skips on Windows. The startup-isolation and stale-port logic run
+cross-platform (`mcp/tests/test_startup_isolation.py`,
+`mcp/tests/test_stale_port_recovery.py`).
+
+---
+
 ## Appendix: files changed for Windows support
 
 Eight files, all verified working:

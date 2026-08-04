@@ -347,6 +347,16 @@ def graph_refresh(graph: str = "code") -> dict:
                     [graph_io.resolve_graphify(), "update", ".", "--force"],
                     cwd=repo_root,
                     check=True,
+                    # stdin=DEVNULL is load-bearing on Windows: this runs in the
+                    # MCP-server process, whose stdin (as the Claude Code stdio
+                    # server) is a pipe the parent holds a permanent blocking read
+                    # on. capture_output only sets stdout/stderr; without an
+                    # explicit stdin the graphify child INHERITS that blocking-read
+                    # pipe and its interpreter startup hangs identically to the
+                    # companion-spawn bug (M2 diagnosis, comment 162) — here bounded
+                    # only by timeout=120, i.e. a guaranteed 2-minute stall per
+                    # call. Harmless on POSIX.
+                    stdin=subprocess.DEVNULL,
                     capture_output=True,
                     text=True,
                     encoding="utf-8",
