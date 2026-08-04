@@ -312,6 +312,9 @@ _JobObjectExtendedLimitInformation = 9  # JOBOBJECTINFOCLASS enum value
 _PROCESS_TERMINATE = 0x0001
 _PROCESS_SET_QUOTA = 0x0100
 _PROCESS_QUERY_LIMITED_INFORMATION = 0x1000
+_SYNCHRONIZE = 0x00100000  # right required to WaitForSingleObject on the handle
+_WAIT_OBJECT_0 = 0x00000000  # WaitForSingleObject: the process object is signaled = EXITED
+_WAIT_TIMEOUT = 0x00000102   # WaitForSingleObject: still running within the timeout
 
 # Process-wide job handle, created once and held for the parent's lifetime. It is
 # deliberately never closed while the server runs — its closure on process teardown
@@ -373,6 +376,8 @@ def _get_kernel32():
     k32.AssignProcessToJobObject.argtypes = [wintypes.HANDLE, wintypes.HANDLE]
     k32.CloseHandle.restype = wintypes.BOOL
     k32.CloseHandle.argtypes = [wintypes.HANDLE]
+    k32.WaitForSingleObject.restype = wintypes.DWORD
+    k32.WaitForSingleObject.argtypes = [wintypes.HANDLE, wintypes.DWORD]
     _kernel32 = k32
     return _kernel32
 
@@ -456,18 +461,27 @@ def _pid_alive(pid: int) -> bool:
     POSIX: ``os.kill(pid, 0)`` (ProcessLookupError => dead; PermissionError => alive,
     owned by another user). Windows: ``os.kill(pid, 0)`` would route through
     TerminateProcess and KILL the target, so we must not use it — instead OpenProcess
-    with PROCESS_QUERY_LIMITED_INFORMATION and treat a valid handle as alive.
+    and then check the EXIT STATE. A valid handle alone is NOT enough: an exited
+    process whose object is still referenced (e.g. its spawner still holds the handle)
+    remains OpenProcess-able, so we must WaitForSingleObject(handle, 0) — a signaled
+    (WAIT_OBJECT_0) object means the process has exited. On any ambiguity (wait fails)
+    we conservatively report alive, since a false "dead" could terminate a live server
+    while a false "alive" only makes stale-port recovery relocate instead of reclaim.
     """
     if pid <= 0:
         return False
     if os.name == "nt":
         try:
             k32 = _get_kernel32()
-            handle = k32.OpenProcess(_PROCESS_QUERY_LIMITED_INFORMATION, False, pid)
-            if handle:
+            handle = k32.OpenProcess(
+                _PROCESS_QUERY_LIMITED_INFORMATION | _SYNCHRONIZE, False, pid)
+            if not handle:
+                return False  # process fully gone (no object at all)
+            try:
+                # 0 timeout => poll: WAIT_OBJECT_0 means signaled = exited.
+                return k32.WaitForSingleObject(handle, 0) != _WAIT_OBJECT_0
+            finally:
                 k32.CloseHandle(handle)
-                return True
-            return False
         except Exception:
             return False
     try:
