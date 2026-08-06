@@ -195,11 +195,26 @@ instead of raising when the extras are absent.
   directory; auto-detects a ChatGPT `conversations.json` export vs. Markdown/text.
   `source_type='news'` requires `published_at`. Content-hash dedup makes an
   unchanged re-ingest a no-op and cleanly replaces a changed file's chunks.
-- `memory_query(query, top_k=8, source_type=None, date_from=None, date_to=None)`
+- `memory_query(query, top_k=8, source_type=None, date_from=None, date_to=None, rerank=False, rerank_pool=None, max_per_doc=1)`
   — hybrid BM25 (FTS5) + vector kNN (sqlite-vec) fused with RRF (k=60), with
-  optional source-type and date-range filters.
+  optional source-type and date-range filters. Optional `rerank=True`
+  (Phase-3a experiment, OFF by default) fuses a larger candidate pool
+  (`rerank_pool`, default 50), rescores each `(query, chunk)` pair with a local
+  cross-encoder, and returns the top_k by that score (each row gains a
+  `rerank_score`). `max_per_doc` (**default 1, dedup ON**) keeps at most
+  that many chunks per source document in the final ranking and backfills the
+  freed slots with further DISTINCT documents, so top_k surfaces distinct
+  conversations instead of several chunks of one crowding it out; it is applied
+  AFTER fusion and rerank (the top-ranked chunk of each doc wins), adds no model
+  and no latency, and composes with `rerank`. Pass `max_per_doc=None` for raw
+  chunks; `rerank=False` with `max_per_doc=None` is identical to the base
+  hybrid query. The
+  reranker is availability-gated the same way as the embedder (see the reranker
+  note below) and returns a clean "unavailable" result if its model cannot load,
+  never a crash.
 - `memory_status()` — availability, corpus stats by source type, embedding model,
-  and DB path/size.
+  and DB path/size. Also reports `reranker_available` and the effective
+  `reranker_model`.
 
 **Storage:** `~/.agent-os/central-memory/memory.sqlite` — machine-global, **not**
 repo-local (the corpus is inherently cross-repo). Tables (schema `user_version` 1):
@@ -211,9 +226,18 @@ code (no DB CHECK). Set `AGENT_OS_MEMORY_HOME` to relocate the store (the tests
 use this so they never touch your real home). Runs in WAL mode with the same
 per-operation connection discipline as the card DB.
 
+**Cross-encoder reranker (Phase 3a, optional, OFF by default).** The `rerank`
+path uses sentence-transformers' `CrossEncoder` — the SAME runtime the embedder
+already needs — so it adds **no new dependency and no new requirements file**;
+it is available wherever the embedder is, minus a one-time model download
+(default `cross-encoder/ms-marco-MiniLM-L-6-v2`, overridable via
+`AGENT_OS_MEMORY_RERANKER_MODEL`; scoring batch via `AGENT_OS_MEMORY_RERANK_BATCH`).
+It stays OFF by default pending the ranking-quality go/no-go gate measured by
+`scripts/memory_eval.py` (baseline hybrid vs. hybrid+rerank, nDCG@10 + per-query
+CPU latency, on a **copy** of the corpus). See `mcp/memory/reranker.py`.
+
 Out of scope for Phase 0 (later phases): graph edges, agent-writable nodes,
-reranker, decay ranking, consolidation, PDF ingestion, and automated news
-fetching.
+decay ranking, consolidation, PDF ingestion, and automated news fetching.
 
 ## Extending
 
@@ -230,8 +254,9 @@ Future features (not in scope yet):
 - `mcp/server.py` - Thin MCP entrypoint; tools live in `mcp/*_tools.py` modules
 - `mcp/requirements.txt` - Core dependencies (`mcp`, `flask`, `python-dotenv`)
 - `mcp/db_requirements.txt` - Optional database-graph extras (`pyodbc`, `networkx`, `pyvis`)
-- `mcp/memory_tools.py` + `mcp/memory/` - Optional central memory subsystem (see above)
-- `mcp/memory_requirements.txt` - Optional memory extras (`sqlite-vec`, `pysqlite3-binary`, `sentence-transformers`)
+- `mcp/memory_tools.py` + `mcp/memory/` - Optional central memory subsystem (see above); `mcp/memory/reranker.py` is the Phase-3a cross-encoder reranker (shares the memory extras, no new dependency)
+- `mcp/memory_requirements.txt` - Optional memory extras (`sqlite-vec`, `pysqlite3-binary`, `sentence-transformers`; the reranker reuses these)
+- `scripts/memory_eval.py` - Retrieval-quality go/no-go eval harness (baseline hybrid vs. hybrid+rerank and vs. per-document dedup; recall/nDCG@10 + distinct-doc-diversity + latency; `--examples` for before/after; run against a COPY of the corpus)
 - `templates/mcp.json.tmpl`, `templates/hooks.json.tmpl` - Committed launcher-config templates (interpreter = `@@PYTHON@@`)
 - `scripts/generate_config.py` - Generates `.mcp.json` + `hooks/hooks.json` from the templates
 - `installer/install.sh`, `installer/install.ps1` - Per-platform bootstrap installers (venv + deps + generate + verify)

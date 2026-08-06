@@ -44,6 +44,7 @@ from .availability import (
     resolve_sqlite_module,
 )
 from .embeddings import Embedder
+from .reranker import Reranker
 from .retrieval import RRF_K, fuse_ranked_ids
 
 # Current on-disk schema version (PRAGMA user_version).  Bump + add a migration
@@ -57,6 +58,32 @@ _MIN_CANDIDATE_POOL = 50
 _CANDIDATE_MULTIPLIER = 5
 _VEC_K_LIMIT = 4096
 _FTS_MAX_TERMS = 32
+
+# Default number of hybrid candidates to fetch and feed the cross-encoder when
+# reranking is on (Phase 3a).  The reranker reorders WITHIN this pool, so a
+# larger pool trades latency for the chance to promote a truly-relevant chunk
+# that plain fusion ranked below top_k.  Configurable per query via rerank_pool.
+_DEFAULT_RERANK_POOL = 50
+
+# Hard ceiling on rerank_pool to guard against pathological inputs (mirrors the
+# validation on top_k): reranking scores every pooled candidate with the
+# cross-encoder, so an unbounded pool is an unbounded-latency footgun.
+_MAX_RERANK_POOL = 1000
+
+# Default fused-candidate pool to materialize when per-document de-duplication is
+# on (``max_per_doc``).  Dedup drops repeat-doc chunks and BACKFILLS the freed
+# top_k slots from further down this pool, so a modest superset of top_k is
+# needed for the backfill to reach distinct docs.  Reuses the SAME pool
+# machinery the rerank path uses (``_candidate_pool`` + ``fuse_ranked_ids``); the
+# effective pool is never smaller than top_k.  Adds no latency (no model): it
+# only fuses/slices a few more already-retrieved candidate ids.
+_DEFAULT_DEDUP_POOL = 50
+
+# Dedup pool must SCALE with top_k (it drops repeat-doc chunks then backfills
+# distinct docs), so a fixed floor collapses to top_k once top_k>=50 and starves
+# the backfill.  Effective pool = top_k * this, floored at _DEFAULT_DEDUP_POOL,
+# capped at the vec kNN hard limit (_VEC_K_LIMIT).
+_DEDUP_POOL_MULTIPLIER = 10
 
 _WORD_RE = re.compile(r"\w+")
 _VEC_DIM_RE = re.compile(r"FLOAT\[(\d+)\]")
@@ -556,6 +583,11 @@ class MemoryStore:
         source_type: Optional[str] = None,
         date_from: Optional[str] = None,
         date_to: Optional[str] = None,
+        *,
+        rerank: bool = False,
+        reranker: Optional[Reranker] = None,
+        rerank_pool: Optional[int] = None,
+        max_per_doc: Optional[int] = None,
     ) -> List[dict]:
         """Hybrid BM25 + vector kNN retrieval fused with RRF (k=60).
 
@@ -564,6 +596,26 @@ class MemoryStore:
         queries stay correct at corpus scale instead of starving a fixed
         post-filtered pool.  Returns the top_k chunks with document metadata and
         fusion score.
+
+        Optional cross-encoder reranking (Phase 3a, OFF by default): when
+        ``rerank`` is True a ``reranker`` must be supplied, fusion collects a
+        larger candidate POOL (``rerank_pool``, default
+        :data:`_DEFAULT_RERANK_POOL`, never below ``top_k``), the reranker scores
+        each ``(query, chunk_text)`` pair, and the pool is reordered by that score.
+        Each returned row then carries a ``rerank_score`` field (the RRF ``score``
+        is preserved alongside it).
+
+        Optional per-document de-duplication (OFF by default): when
+        ``max_per_doc`` is an int, the FINAL ranked list keeps at most that many
+        chunks per ``doc_id`` (preserving rank order) and BACKFILLS the slots this
+        frees from further down a fused pool that scales with ``top_k``
+        (:meth:`_resolve_dedup_pool`), so ``top_k`` stays full of DISTINCT documents
+        instead of several chunks of one conversation crowding it.  It is applied
+        AFTER fusion and AFTER rerank, so the highest-ranked chunk of each doc is
+        the one kept.  Adds no model and no latency.
+
+        With ``rerank=False`` and ``max_per_doc=None`` this method's output is
+        byte-identical to Phase 0.
         """
         if embedder.dim != self.embedding_dim:
             raise ValueError(
@@ -577,9 +629,28 @@ class MemoryStore:
             raise ValueError(
                 f"invalid source_type {source_type!r}; expected one of {VALID_SOURCE_TYPES}"
             )
+        if max_per_doc is not None and (
+            isinstance(max_per_doc, bool) or not isinstance(max_per_doc, int) or max_per_doc < 1
+        ):
+            raise ValueError(
+                f"max_per_doc must be a positive integer or None, got {max_per_doc!r}"
+            )
+
+        # How many fused candidates to materialize.  Without rerank OR dedup this
+        # is exactly top_k (Phase-0 behavior).  Rerank needs a larger pool the
+        # cross-encoder reorders within; dedup needs a larger pool to backfill
+        # distinct docs into slots freed by dropping repeat-doc chunks.  When both
+        # are on the pool is the max of the two.  Never fewer than top_k.
+        pool_target = top_k
+        if rerank:
+            if reranker is None:
+                raise ValueError("rerank=True requires a reranker")
+            pool_target = max(pool_target, self._resolve_rerank_pool(rerank_pool, top_k))
+        if max_per_doc is not None:
+            pool_target = max(pool_target, self._resolve_dedup_pool(top_k))
 
         sqlite_vec = _import_sqlite_vec()
-        pool = self._candidate_pool(top_k)
+        pool = self._candidate_pool(pool_target)
         query_vec = embedder.embed_query(query)
         fts_expr = _fts_query(query)
         filt_sql, filt_params = self._doc_filter_sql(source_type, date_from, date_to)
@@ -621,10 +692,91 @@ class MemoryStore:
                 fts_params.append(pool)
                 fts_ids = [r["chunk_id"] for r in conn.execute(fts_sql, fts_params).fetchall()]
 
-            fused = fuse_ranked_ids(vec_ids, fts_ids, top_k=top_k, k=RRF_K)
+            fused = fuse_ranked_ids(vec_ids, fts_ids, top_k=pool_target, k=RRF_K)
             rows = self._load_candidate_rows(conn, [cid for cid, _ in fused])
 
-        return [self._result_row(rows[cid], score) for cid, score in fused if cid in rows]
+        results = [self._result_row(rows[cid], score) for cid, score in fused if cid in rows]
+        if rerank:
+            assert reranker is not None  # narrowed above; guards the type checker
+            results = self._rerank_order(reranker, query, results)
+        # Single tail step: de-duplicate by doc (backfilling distinct docs) when
+        # requested, else just slice.  Applied AFTER fusion and AFTER rerank so the
+        # top-ranked chunk of each doc is the one kept.
+        if max_per_doc is not None:
+            return self._dedup_by_doc(results, max_per_doc, top_k)
+        return results[:top_k]
+
+    @staticmethod
+    def _resolve_dedup_pool(top_k: int) -> int:
+        """Fused-candidate pool for dedup: headroom that SCALES with top_k so the
+        backfill can reach distinct docs (a fixed floor starves it once
+        top_k>=50).  Floored at _DEFAULT_DEDUP_POOL, capped at the vec kNN limit."""
+        return min(max(_DEFAULT_DEDUP_POOL, top_k * _DEDUP_POOL_MULTIPLIER), _VEC_K_LIMIT)
+
+    @staticmethod
+    def _resolve_rerank_pool(rerank_pool: Optional[int], top_k: int) -> int:
+        """Validate/normalize the rerank candidate-pool size (top_k <= pool <= cap)."""
+        if rerank_pool is None:
+            pool = _DEFAULT_RERANK_POOL
+        elif isinstance(rerank_pool, bool) or not isinstance(rerank_pool, int) or rerank_pool < 1:
+            raise ValueError(f"rerank_pool must be a positive integer, got {rerank_pool!r}")
+        elif rerank_pool > _MAX_RERANK_POOL:
+            raise ValueError(f"rerank_pool must be <= {_MAX_RERANK_POOL}, got {rerank_pool!r}")
+        else:
+            pool = rerank_pool
+        return max(pool, top_k)
+
+    @staticmethod
+    def _rerank_order(reranker: Reranker, query: str, results: List[dict]) -> List[dict]:
+        """Reorder the WHOLE fused pool by cross-encoder score; do not slice.
+
+        Scores each ``(query, chunk_text)`` pair, sorts by score descending with a
+        deterministic ``chunk_id`` tie-break, and annotates every row with
+        ``rerank_score`` (the RRF ``score`` is left intact so both signals are
+        visible to callers).  Slicing to ``top_k`` — and any per-doc dedup — is
+        the caller's single tail step, so rerank composes cleanly with dedup: the
+        top-ranked chunk of each doc after reranking is the one dedup keeps.
+        """
+        if not results:
+            return []
+        scores = reranker.score(query, [r["text"] for r in results])
+        if len(scores) != len(results):
+            raise ValueError(
+                f"reranker returned {len(scores)} scores for {len(results)} candidates"
+            )
+        order = sorted(
+            range(len(results)),
+            key=lambda i: (-scores[i], results[i]["chunk_id"]),
+        )
+        reranked: List[dict] = []
+        for i in order:
+            row = dict(results[i])
+            row["rerank_score"] = round(float(scores[i]), 6)
+            reranked.append(row)
+        return reranked
+
+    @staticmethod
+    def _dedup_by_doc(results: List[dict], max_per_doc: int, top_k: int) -> List[dict]:
+        """Keep at most ``max_per_doc`` chunks per ``doc_id``, then take ``top_k``.
+
+        Walks the already-ranked ``results`` in order, admitting a chunk only
+        while its doc is under quota; repeat-doc chunks beyond the quota are
+        skipped, which lets later DISTINCT-doc chunks BACKFILL the freed slots so
+        ``top_k`` stays full of distinct documents.  Rank order is preserved and
+        no doc appears more than ``max_per_doc`` times.  Stops as soon as ``top_k``
+        rows are collected.
+        """
+        counts: Dict[str, int] = {}
+        kept: List[dict] = []
+        for row in results:
+            doc_id = row["doc_id"]
+            if counts.get(doc_id, 0) >= max_per_doc:
+                continue
+            counts[doc_id] = counts.get(doc_id, 0) + 1
+            kept.append(row)
+            if len(kept) >= top_k:
+                break
+        return kept
 
     def _load_candidate_rows(self, conn, chunk_ids) -> Dict[str, dict]:
         rows: Dict[str, dict] = {}

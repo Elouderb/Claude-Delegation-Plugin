@@ -37,6 +37,15 @@ DEFAULT_EMBEDDING_DIM = 384
 # (passages are embedded verbatim).
 BGE_QUERY_PROMPT = "Represent this sentence for searching relevant passages: "
 
+# Phase-3a cross-encoder reranker (OFF by default; go/no-go experiment).  The
+# reranker is NOT a new dependency: it runs on the SAME sentence-transformers
+# runtime as the embedder (via its CrossEncoder class), so it is available
+# wherever the embedder is and needs no separate requirements file.  Only an
+# additional small model download (cached once, then offline).  The default here
+# is the light, CPU-friendly ms-marco MiniLM; ``AGENT_OS_MEMORY_RERANKER_MODEL``
+# overrides it without a code change (e.g. to swap in bge-reranker-base).
+DEFAULT_RERANKER_MODEL = "cross-encoder/ms-marco-MiniLM-L-6-v2"
+
 # Environment override so tests never touch the real ~/.agent-os.  When set, the
 # central store lives at ``$AGENT_OS_MEMORY_HOME/memory.sqlite``.
 _HOME_ENV = "AGENT_OS_MEMORY_HOME"
@@ -156,10 +165,17 @@ def check_availability() -> dict:
     if not embedder_available:
         missing.append("sentence-transformers")
 
+    # The Phase-3a reranker shares the sentence-transformers runtime, so its
+    # dependency availability is exactly the embedder's (a separate, small model
+    # download is still required at first use; that failure surfaces later as
+    # MemoryUnavailable at reranker construction, mirroring the embedder).
+    reranker_available = embedder_available
+
     return {
         "available": storage_available and embedder_available,
         "storage_available": storage_available,
         "embedder_available": embedder_available,
+        "reranker_available": reranker_available,
         "sqlite_backend": sqlite_backend,
         "missing": missing,
         "hint": _INSTALL_HINT,

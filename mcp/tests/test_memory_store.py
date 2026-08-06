@@ -437,5 +437,167 @@ class TestExistingVecDimGuard(MemoryStoreTestBase):
             mismatched.stats()  # _ensure_schema detects the dim mismatch on connect
 
 
+# --------------------------------------------------------------------------- #
+# Per-document de-duplication (max_per_doc).  Built on a MULTI-chunk corpus so a
+# single document can crowd top_k, which the 4 single-chunk files above cannot
+# exercise.  Documents are constructed directly (SourceDocument/ChunkInput) with
+# a recorded embedder that places each chunk at a chosen L2 distance from the
+# query, giving a deterministic fused order: A0 < A1 < A2 < B0 < C0 < B1.
+# --------------------------------------------------------------------------- #
+def _dedup_vec(axis: int, offset: float) -> list:
+    """Query axis-0 unit + an ``offset`` on a private axis => L2 distance==offset."""
+    v = [0.0] * DIM
+    v[0] = 1.0
+    if axis:
+        v[axis] = offset
+    return v
+
+
+# (chunk-text, distance-axis, distance) — distances chosen so the vector rank
+# order is exactly the listing order below.
+_A0, _A1, _A2 = "alpha zero body", "alpha one body", "alpha two body"
+_B0, _B1 = "bravo zero body", "bravo one body"
+_C0 = "charlie zero body"
+_DEDUP_QUERY = "seeking distinct relevant passages"  # zero lexical overlap w/ chunks
+
+
+class TestDedupPoolSizing(unittest.TestCase):
+    """Regression: the dedup fused-candidate pool must keep BACKFILL headroom that
+    scales with top_k.  The original ``max(_DEFAULT_DEDUP_POOL, top_k)`` collapsed
+    to exactly top_k once top_k>=50, silently starving the distinct-doc backfill
+    (memory_query(top_k=60, max_per_doc=1) returned ~27 docs, not 60).  Pure
+    static-method check, so it needs no storage extras."""
+
+    def test_pool_scales_with_top_k_and_is_capped(self):
+        from memory.store import MemoryStore, _DEFAULT_DEDUP_POOL, _VEC_K_LIMIT
+
+        # small top_k: at least the floor.
+        self.assertGreaterEqual(MemoryStore._resolve_dedup_pool(8), _DEFAULT_DEDUP_POOL)
+        # top_k >= 50: pool MUST exceed top_k (the bug was pool == top_k, no backfill).
+        for tk in (50, 60, 100, 400):
+            self.assertGreater(
+                MemoryStore._resolve_dedup_pool(tk), tk,
+                f"dedup pool has no backfill headroom at top_k={tk}",
+            )
+        # pathological top_k: capped at the vec kNN hard limit.
+        self.assertEqual(MemoryStore._resolve_dedup_pool(1_000_000), _VEC_K_LIMIT)
+
+
+@unittest.skipUnless(
+    _STORAGE,
+    "memory storage extras (sqlite-vec + pysqlite3) not installed",
+)
+class TestDedupByDoc(unittest.TestCase):
+    def setUp(self):
+        from memory.store import MemoryStore
+        from memory.adapters.base import ChunkInput, SourceDocument, sha256_text
+
+        self._tmp = tempfile.TemporaryDirectory(prefix="agent_os_dedup_")
+        self.root = Path(self._tmp.name)
+        self.store = MemoryStore(self.root / "memory.sqlite", embedding_dim=DIM)
+
+        self.embedder = StubEmbedder(
+            {
+                _DEDUP_QUERY: _dedup_vec(0, 0.0),  # query -> exact e0
+                _A0: _dedup_vec(1, 0.01),
+                _A1: _dedup_vec(2, 0.02),
+                _A2: _dedup_vec(3, 0.03),
+                _B0: _dedup_vec(4, 0.04),
+                _C0: _dedup_vec(5, 0.05),
+                _B1: _dedup_vec(6, 0.06),
+            },
+            dim=DIM,
+        )
+        # StubEmbedder normalizes; that keeps the distance monotonic in the offset
+        # (larger offset -> larger angle from e0), so the fused order is preserved.
+
+        def _doc(doc_id, title, texts):
+            return SourceDocument(
+                doc_id=doc_id, title=title, source_type="document",
+                source_path=f"/virtual/{doc_id}.txt",
+                content_hash=sha256_text("|".join(texts)),
+                provenance="uploaded", published_at=None,
+                chunks=[ChunkInput(seq=i, text=t) for i, t in enumerate(texts)],
+            )
+
+        docs = [
+            _doc("docA", "A", [_A0, _A1, _A2]),
+            _doc("docB", "B", [_B0, _B1]),
+            _doc("docC", "C", [_C0]),
+        ]
+        summary = self.store.ingest_documents(docs, self.embedder)
+        self.assertEqual(summary["documents_new"], 3)
+
+    def tearDown(self):
+        self._tmp.cleanup()
+
+    def _docs(self, results):
+        return [r["doc_id"] for r in results]
+
+    def _full_order(self):
+        # The whole ranked list (no dedup), as chunk_ids, for order-preservation.
+        return [r["chunk_id"] for r in self.store.query(self.embedder, _DEDUP_QUERY, top_k=10)]
+
+    def test_baseline_is_chunk_crowded(self):
+        # Without dedup, docA's three chunks fill the whole top-3 (the bug).
+        res = self.store.query(self.embedder, _DEDUP_QUERY, top_k=3)
+        self.assertEqual(self._docs(res), ["docA", "docA", "docA"])
+
+    def test_default_none_is_byte_identical(self):
+        base = self.store.query(self.embedder, _DEDUP_QUERY, top_k=3)
+        explicit = self.store.query(self.embedder, _DEDUP_QUERY, top_k=3, max_per_doc=None)
+        self.assertEqual(base, explicit)
+
+    def test_max_per_doc_1_backfills_distinct_docs(self):
+        res = self.store.query(self.embedder, _DEDUP_QUERY, top_k=3, max_per_doc=1)
+        # top_k stays full, now with THREE distinct docs (B0, C0 backfilled from
+        # beyond the previously chunk-crowded top-3).
+        self.assertEqual(self._docs(res), ["docA", "docB", "docC"])
+        self.assertEqual(len(set(self._docs(res))), 3)
+
+    def test_max_per_doc_2_keeps_at_most_two_and_preserves_order(self):
+        res = self.store.query(self.embedder, _DEDUP_QUERY, top_k=3, max_per_doc=2)
+        self.assertEqual(self._docs(res), ["docA", "docA", "docB"])
+        # No doc exceeds the cap.
+        for doc_id in set(self._docs(res)):
+            self.assertLessEqual(self._docs(res).count(doc_id), 2)
+
+    def test_kept_order_is_a_subsequence_of_full_ranking(self):
+        full = self._full_order()
+        for m in (1, 2):
+            kept = [r["chunk_id"] for r in
+                    self.store.query(self.embedder, _DEDUP_QUERY, top_k=6, max_per_doc=m)]
+            # Rank order preserved: the kept chunks appear in the same relative
+            # order as in the undeduped ranking.
+            it = iter(full)
+            self.assertTrue(all(cid in it for cid in kept),
+                            f"kept={kept} not a subsequence of {full}")
+
+    def test_the_kept_chunk_per_doc_is_the_top_ranked_one(self):
+        # max_per_doc=1 keeps the HIGHEST-ranked chunk of each doc (A0, not A1/A2;
+        # B0, not B1).
+        res = self.store.query(self.embedder, _DEDUP_QUERY, top_k=3, max_per_doc=1)
+        by_doc = {r["doc_id"]: r["chunk_id"] for r in res}
+        self.assertEqual(by_doc["docA"], "mem:docA:0")
+        self.assertEqual(by_doc["docB"], "mem:docB:0")
+
+    def test_no_duplicate_docs_beyond_cap_even_at_large_top_k(self):
+        res = self.store.query(self.embedder, _DEDUP_QUERY, top_k=6, max_per_doc=1)
+        docs = self._docs(res)
+        self.assertEqual(docs, ["docA", "docB", "docC"])  # only 3 distinct docs exist
+        self.assertEqual(len(docs), len(set(docs)))
+
+    def test_invalid_max_per_doc_rejected(self):
+        for bad in (0, -1, True, "1", 1.5):
+            with self.assertRaises(ValueError):
+                self.store.query(self.embedder, _DEDUP_QUERY, top_k=3, max_per_doc=bad)
+
+    def test_empty_store_with_dedup_returns_empty(self):
+        from memory.store import MemoryStore
+
+        empty = MemoryStore(self.root / "empty.sqlite", embedding_dim=DIM)
+        self.assertEqual(empty.query(self.embedder, "anything", max_per_doc=1), [])
+
+
 if __name__ == "__main__":
     unittest.main()

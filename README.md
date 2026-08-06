@@ -158,7 +158,7 @@ it); it bundles a modern SQLite with extensions enabled. The embedding model
 | Tool | Purpose |
 |------|---------|
 | `memory_ingest(path, source_type=None, published_at=None)` | Ingest a file or directory. Auto-detects a ChatGPT `conversations.json` export vs. Markdown/text. `source_type='news'` requires `published_at`. Content-hash dedup: re-ingesting an unchanged file is a no-op; a changed file replaces its chunks. |
-| `memory_query(query, top_k=8, source_type=None, date_from=None, date_to=None)` | Hybrid BM25 (FTS5) + vector kNN (sqlite-vec) fused with RRF (k=60). Optional `source_type` / date-range filters (matched against `published_at`, falling back to `ingested_at`). |
+| `memory_query(query, top_k=8, source_type=None, date_from=None, date_to=None, rerank=False, rerank_pool=None, max_per_doc=1)` | Hybrid BM25 (FTS5) + vector kNN (sqlite-vec) fused with RRF (k=60). Optional `source_type` / date-range filters (matched against `published_at`, falling back to `ingested_at`). Optional `rerank=True` (Phase-3a, off by default) rescores a larger candidate pool with a local cross-encoder and returns the top_k by that score. `max_per_doc` (**default 1, dedup ON**) keeps at most N chunks per source document and backfills distinct documents into the freed top_k slots so distinct conversations surface (applied after fusion/rerank; no model, no latency); pass `max_per_doc=None` for raw chunks. Base hybrid output when `rerank=False` and `max_per_doc=None`. |
 | `memory_status()` | Availability, corpus stats by source type, embedding model, and DB path/size. |
 
 All memory state lives under `~/.agent-os/central-memory/` (machine-global, **not**
