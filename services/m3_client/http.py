@@ -122,6 +122,16 @@ class Client:
         url = self._url("/v1/events/recent", params)
         return _request("GET", url, self.api_key, timeout=self.timeout)
 
+    def get_tasks(
+        self, *, repository_id: Optional[str] = None, since: Optional[int] = None,
+        limit: int = 200,
+    ) -> Dict[str, Any]:
+        """Returns the raw ``{"tasks": [...], "next_since": int|None}`` body — the
+        DOWN-projection poller keyset-walks by ``next_since``."""
+        params = {"repository_id": repository_id, "since": since, "limit": limit}
+        url = self._url("/v1/tasks", params)
+        return _request("GET", url, self.api_key, timeout=self.timeout)
+
     def get_sync_cursor(self, client_id: str) -> Dict[str, Any]:
         url = self._url(f"/v1/sync/{urllib.parse.quote(client_id, safe='')}")
         return _request("GET", url, self.api_key, timeout=self.timeout)

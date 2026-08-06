@@ -84,4 +84,62 @@ class TaskRecord(AgentOSModel):
     )
 
 
-__all__ = ["TaskSyncStatus", "TaskRecord"]
+# --------------------------------------------------------------------------- #
+# Local card lifecycle <-> synchronizable status mapping (Phase 2a).
+#
+# The repository-local card model has exactly three lifecycle states
+# ("Created" -> "In Progress" -> "Complete", see mcp/card_tools.VALID_STATUSES);
+# :class:`TaskSyncStatus` additionally carries an explicit ``blocked`` state the
+# distributed system routes around.  These two pure helpers are the single home
+# for the round-trip so the UP materializer (services/api/store) and the DOWN
+# projection (mcp/card_tools.apply_task_projection) can never drift.  ``blocked``
+# has no local equivalent, so a down-projection renders it as "In Progress" (the
+# closest active local state) rather than inventing a fourth card status.
+_LOCAL_TO_SYNC = {
+    "Created": TaskSyncStatus.CREATED,
+    "In Progress": TaskSyncStatus.IN_PROGRESS,
+    "Complete": TaskSyncStatus.COMPLETE,
+}
+_SYNC_TO_LOCAL = {
+    TaskSyncStatus.CREATED: "Created",
+    TaskSyncStatus.IN_PROGRESS: "In Progress",
+    TaskSyncStatus.BLOCKED: "In Progress",  # local card model has no 'blocked'
+    TaskSyncStatus.COMPLETE: "Complete",
+}
+
+
+def local_status_to_sync(local_status: Optional[str]) -> str:
+    """Map a local card status string to a :class:`TaskSyncStatus` value string.
+
+    An unknown/None status falls back to ``created`` (the safe initial state),
+    never raising — a materializer must never fail a task row over a status it
+    does not recognise.
+    """
+    return _LOCAL_TO_SYNC.get(local_status or "", TaskSyncStatus.CREATED).value
+
+
+def sync_status_to_local(status: object) -> str:
+    """Map a :class:`TaskSyncStatus` (enum or value string) to a local card status.
+
+    Accepts either a ``TaskSyncStatus`` member or its dotted value string.  An
+    unknown value falls back to ``"Created"`` so a down-projection always writes a
+    valid local card status (mcp/card_tools.VALID_STATUSES).
+    """
+    if isinstance(status, TaskSyncStatus):
+        member: Optional[TaskSyncStatus] = status
+    else:
+        try:
+            member = TaskSyncStatus(status)
+        except ValueError:
+            member = None
+    if member is None:
+        return "Created"
+    return _SYNC_TO_LOCAL.get(member, "Created")
+
+
+__all__ = [
+    "TaskSyncStatus",
+    "TaskRecord",
+    "local_status_to_sync",
+    "sync_status_to_local",
+]

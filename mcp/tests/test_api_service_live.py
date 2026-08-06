@@ -29,14 +29,20 @@ from database import migrate  # noqa: E402
 from services.api.app import create_app  # noqa: E402
 from services.api.store import SqlStore  # noqa: E402
 
-_HAS_CENTRAL_DB = bool(os.environ.get(migrate.ENV_VAR))
+# DOUBLE-gated: a connection string AND an explicit opt-in are BOTH required.
+# setUpClass calls migrate.apply_pending against the REAL DB, so presence of a
+# connection string alone is unsafe (a plain full-suite run would silently migrate
+# production). Opt in deliberately with AGENT_OS_RUN_LIVE_DB_TESTS=1.
+_HAS_CENTRAL_DB = bool(os.environ.get(migrate.ENV_VAR)) and (
+    os.environ.get("AGENT_OS_RUN_LIVE_DB_TESTS") == "1"
+)
 _KEY = "live-test-key"
 _AUTH = {"Authorization": f"Bearer {_KEY}"}
 
 
 @unittest.skipUnless(
     _HAS_CENTRAL_DB,
-    f"{migrate.ENV_VAR} not set - skipping live API integration test",
+    f"live API integration test requires {migrate.ENV_VAR} + AGENT_OS_RUN_LIVE_DB_TESTS=1",
 )
 class TestLiveApiService(unittest.TestCase):
     @classmethod

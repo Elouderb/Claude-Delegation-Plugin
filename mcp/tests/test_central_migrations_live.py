@@ -30,12 +30,19 @@ if str(_REPO_ROOT) not in sys.path:
 
 from database import migrate  # noqa: E402
 
-_HAS_CENTRAL_DB = bool(os.environ.get(migrate.ENV_VAR))
+# DOUBLE-gated: a connection string AND an explicit opt-in are BOTH required.
+# These tests call migrate.apply_pending against the REAL DB, so presence of a
+# connection string alone is unsafe (a plain full-suite run would silently migrate
+# production). Opt in deliberately with AGENT_OS_RUN_LIVE_DB_TESTS=1.
+_HAS_CENTRAL_DB = bool(os.environ.get(migrate.ENV_VAR)) and (
+    os.environ.get("AGENT_OS_RUN_LIVE_DB_TESTS") == "1"
+)
 
 EXPECTED_TABLES = {
     ("registry", "machines"),
     ("registry", "repositories"),
     ("registry", "agent_sessions"),
+    ("registry", "tasks"),  # migration 006 (Phase 2a task down-projection)
     ("ops", "events"),
     ("ops", "sync_cursors"),
     ("ops", "ingest_errors"),
@@ -70,7 +77,7 @@ ORDER BY i.name, ic.key_ordinal
 
 @unittest.skipUnless(
     _HAS_CENTRAL_DB,
-    f"{migrate.ENV_VAR} not set - skipping live central-DB migration test",
+    f"live central-DB migration test requires {migrate.ENV_VAR} + AGENT_OS_RUN_LIVE_DB_TESTS=1",
 )
 class TestLiveCentralMigrations(unittest.TestCase):
     """Applies the real migrations to the real agent_os_memory and verifies them."""

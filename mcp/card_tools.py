@@ -59,13 +59,19 @@ def _repo_root() -> Optional[Path]:
     return _db_path.parent.parent
 
 
-def _emit_task_event(emit_method: str, *, card_id, title, status, priority) -> None:
+def _emit_task_event(
+    emit_method: str, *, card_id, title, status, priority,
+    global_id=None, version=None, description=None,
+) -> None:
     """Emit one task lifecycle event (best-effort; never raises to the caller).
 
     Single helper for the three previously copy-pasted emission blocks
     (create/update/complete). Resolves the outbox + the shared emission repo root,
     no-ops if either is unavailable, and swallows any error so a card write is
-    never reported as a failure because of the outbox.
+    never reported as a failure because of the outbox. The Phase 2a sync fields
+    (``global_id``/``version``/``description``) make the emitted payload
+    TaskRecord-shaped so the central materializer can down-project it; they are
+    passed through only when present.
     """
     try:
         ob = graph_io.get_outbox()
@@ -73,10 +79,48 @@ def _emit_task_event(emit_method: str, *, card_id, title, status, priority) -> N
         if ob is None or root is None:
             return
         getattr(ob, emit_method)(
-            root, card_id=card_id, title=title, status=status, priority=priority
+            root, card_id=card_id, title=title, status=status, priority=priority,
+            global_id=global_id, version=version, description=description,
         )
     except Exception as exc:  # defense-in-depth: emit must never fail a card op
         log(f"event emission skipped ({emit_method}): {exc}")
+
+
+def _mint_global_id() -> Optional[str]:
+    """Mint a fresh central task id (``task_`` ULID), or ``None`` if unavailable.
+
+    Guarded and lazy: imports only ``contracts.identifiers`` (stdlib-backed, no
+    pydantic) and never raises. A checkout genuinely missing the bundled
+    ``contracts`` package simply gets ``None`` — the card is still created, just
+    without a synchronizable global identity (the emitted task event is then inert
+    centrally, exactly as before Phase 2a).
+    """
+    try:
+        from contracts.identifiers import TASK, new_id
+
+        return new_id(TASK)
+    except Exception:
+        return None
+
+
+def _sync_status_to_local(sync_status) -> str:
+    """Map a central TaskSyncStatus (enum/value) to a local card status string.
+
+    Guarded so the down-projection works even without ``contracts`` importable:
+    falls back to an inline table (and, ultimately, ``"Created"``) so it always
+    returns a value in :data:`VALID_STATUSES`.
+    """
+    try:
+        from contracts.tasks import sync_status_to_local
+
+        return sync_status_to_local(sync_status)
+    except Exception:
+        fallback = {
+            "created": "Created", "in_progress": "In Progress",
+            "blocked": "In Progress", "complete": "Complete",
+        }
+        mapped = fallback.get(str(sync_status), "Created")
+        return mapped if mapped in VALID_STATUSES else "Created"
 
 
 def set_db_path(path: Optional[Union[str, Path]]) -> None:
@@ -99,7 +143,9 @@ def _ensure_schema(conn: sqlite3.Connection) -> None:
         status TEXT NOT NULL,
         priority TEXT,
         created_at TIMESTAMP,
-        updated_at TIMESTAMP
+        updated_at TIMESTAMP,
+        global_id TEXT,
+        sync_version INTEGER
     )
     """)
     conn.execute("""
@@ -111,6 +157,23 @@ def _ensure_schema(conn: sqlite3.Connection) -> None:
         created_at TIMESTAMP
     )
     """)
+    _ensure_card_sync_columns(conn)
+
+
+def _ensure_card_sync_columns(conn: sqlite3.Connection) -> None:
+    """Add the Phase 2a sync columns to a pre-existing ``cards`` table.
+
+    ``CREATE TABLE IF NOT EXISTS`` never alters an existing table, so a card DB
+    created before Phase 2a lacks ``global_id`` / ``sync_version``. This adds them
+    idempotently (checked against ``PRAGMA table_info``) so an existing repo's
+    card DB self-heals on the next connection — the same self-healing posture the
+    module docstring describes for a swapped-out ``cards.sqlite``.
+    """
+    existing = {row[1] for row in conn.execute("PRAGMA table_info(cards)").fetchall()}
+    if "global_id" not in existing:
+        conn.execute("ALTER TABLE cards ADD COLUMN global_id TEXT")
+    if "sync_version" not in existing:
+        conn.execute("ALTER TABLE cards ADD COLUMN sync_version INTEGER")
 
 
 @contextmanager
@@ -147,18 +210,23 @@ def create_card(title: str, description: Optional[str] = None, priority: str = "
     try:
         card_id = str(uuid.uuid4())[:8]
         now = datetime.now(timezone.utc).isoformat()
+        # Mint the central canonical task id at creation (proposal §14.2). Best-
+        # effort: None if contracts is unavailable — the card is still created.
+        global_id = _mint_global_id()
+        sync_version = 1
 
         with _connect() as conn:
             conn.execute("""
-            INSERT INTO cards (card_id, title, description, status, priority, created_at, updated_at)
-            VALUES (?, ?, ?, ?, ?, ?, ?)
-            """, (card_id, title, description, "Created", priority, now, now))
+            INSERT INTO cards (card_id, title, description, status, priority, created_at, updated_at, global_id, sync_version)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """, (card_id, title, description, "Created", priority, now, now, global_id, sync_version))
 
-        log(f"Created card {card_id}: {title}")
+        log(f"Created card {card_id} (global_id={global_id}): {title}")
 
         _emit_task_event(
             "emit_task_created", card_id=card_id, title=title,
             status="Created", priority=priority,
+            global_id=global_id, version=sync_version, description=description,
         )
 
         return {
@@ -167,7 +235,9 @@ def create_card(title: str, description: Optional[str] = None, priority: str = "
             "description": description,
             "status": "Created",
             "priority": priority,
-            "created_at": now
+            "created_at": now,
+            "global_id": global_id,
+            "sync_version": sync_version,
         }
     except Exception as e:
         log(f"ERROR creating card: {e}")
@@ -262,6 +332,14 @@ def update_card(card_id: str, title: Optional[str] = None,
 
         updates.append("updated_at = ?")
         params.append(datetime.now(timezone.utc).isoformat())
+        # Every mutation is a new synchronizable version (monotonic; reconciliation-
+        # ready for the next slice). COALESCE handles a pre-Phase-2a row (NULL).
+        updates.append("sync_version = COALESCE(sync_version, 0) + 1")
+        # Backfill a global id for a card created before Phase 2a (NULL stays NULL
+        # only if minting is unavailable) so an updated legacy card becomes
+        # synchronizable without a separate migration pass.
+        updates.append("global_id = COALESCE(global_id, ?)")
+        params.append(_mint_global_id())
         params.append(card_id)
 
         query = f"UPDATE cards SET {', '.join(updates)} WHERE card_id = ?"
@@ -282,6 +360,9 @@ def update_card(card_id: str, title: Optional[str] = None,
                 title=result.get("title"),
                 status=result.get("status"),
                 priority=result.get("priority"),
+                global_id=result.get("global_id"),
+                version=result.get("sync_version"),
+                description=result.get("description"),
             )
 
         return result
@@ -351,6 +432,9 @@ def complete_card(card_id: str, completion_summary: str) -> dict:
                 title=result.get("title"),
                 status=result.get("status"),
                 priority=result.get("priority"),
+                global_id=result.get("global_id"),
+                version=result.get("sync_version"),
+                description=result.get("description"),
             )
 
         log(f"Card {card_id} marked as Complete")
@@ -358,3 +442,78 @@ def complete_card(card_id: str, completion_summary: str) -> dict:
     except Exception as e:
         log(f"ERROR completing card {card_id}: {e}")
         return {"error": f"Failed to complete card: {str(e)}"}
+
+
+def apply_task_projection(task: Union[dict, object]) -> dict:
+    """Apply a central TaskRecord DOWN into the local card DB (Phase 2a).
+
+    The DOWN half of task sync (mirror of the UP-path event emission above): given
+    a central task projection (a TaskRecord-shaped ``dict`` or object with the same
+    attributes), idempotently create-or-update the local ``cards.sqlite`` row that
+    carries this ``global_id``.
+
+    Correctness invariants (see card ffcaf548 scope cuts):
+
+    * **Idempotent, keyed by ``global_id``.** A repeated apply of the same or an
+      older projection finds the existing local card by ``global_id`` and updates
+      it in place (last-write-wins from central — M1 is the sole writer this
+      slice); it never creates a duplicate and never changes the local ``card_id``.
+    * **Never re-emits a task event.** This path writes the card row directly and
+      does NOT call :func:`_emit_task_event` — re-emitting would ship the applied
+      state straight back up and create a sync loop.
+    * **Always writes a valid local status.** The central TaskSyncStatus is mapped
+      back to a :data:`VALID_STATUSES` value (``blocked`` -> "In Progress").
+
+    Best-effort return: the applied local card dict (via :func:`get_card`), or an
+    ``{"error": ...}`` dict — it never raises, so a poller can advance its cursor
+    only on a clean result.
+    """
+    try:
+        def _field(name):
+            return task.get(name) if isinstance(task, dict) else getattr(task, name, None)
+
+        global_id = _field("global_id")
+        if not global_id:
+            return {"error": "apply_task_projection requires a global_id"}
+
+        title = _field("title")
+        description = _field("description")
+        priority = _field("priority")
+        local_status = _sync_status_to_local(_field("status"))
+        version = _field("version")
+        now = datetime.now(timezone.utc).isoformat()
+
+        with _connect() as conn:
+            existing = conn.execute(
+                "SELECT card_id FROM cards WHERE global_id = ?", (global_id,)
+            ).fetchone()
+            if existing is not None:
+                card_id = existing["card_id"]
+                # Last-write-wins update; keep the local card_id, never emit. Content
+                # fields COALESCE so a status-only projection does not blank title.
+                conn.execute(
+                    "UPDATE cards SET title = COALESCE(?, title), "
+                    "description = COALESCE(?, description), "
+                    "priority = COALESCE(?, priority), status = ?, "
+                    "sync_version = ?, updated_at = ? WHERE global_id = ?",
+                    (title, description, priority, local_status, version, now, global_id),
+                )
+                action = "updated"
+            else:
+                # A newly-projected card gets its OWN fresh local display id; the
+                # global_id is the cross-machine identity that keeps it idempotent.
+                card_id = str(uuid.uuid4())[:8]
+                conn.execute(
+                    "INSERT INTO cards (card_id, title, description, status, priority, "
+                    "created_at, updated_at, global_id, sync_version) "
+                    "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                    (card_id, title if title is not None else "", description,
+                     local_status, priority, now, now, global_id, version),
+                )
+                action = "created"
+
+        log(f"Applied task projection {global_id} -> local card {card_id} ({action}, {local_status})")
+        return get_card(card_id)
+    except Exception as e:
+        log(f"ERROR applying task projection: {e}")
+        return {"error": f"Failed to apply task projection: {str(e)}"}
