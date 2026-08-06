@@ -51,3 +51,9 @@ graphify-out/
 # Templates are committed; the generated files are machine-specific.
 .mcp.json
 hooks/hooks.json
+
+# Local-only memory retrieval-eval harness: its hand-curated relevance gold is
+# seeded from PRIVATE ChatGPT conversation titles/themes, so it is kept on-machine
+# and never committed to this public repo (the reranker/dedup product code it
+# measures IS committed and carries no personal data).
+scripts/memory_eval.py

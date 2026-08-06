@@ -16,6 +16,7 @@ cleanly without those dependencies.
 from .availability import (
     DEFAULT_EMBEDDING_DIM,
     DEFAULT_EMBEDDING_MODEL,
+    DEFAULT_RERANKER_MODEL,
     MemoryUnavailable,
     check_availability,
     default_db_path,
@@ -24,6 +25,7 @@ from .availability import (
 __all__ = [
     "DEFAULT_EMBEDDING_DIM",
     "DEFAULT_EMBEDDING_MODEL",
+    "DEFAULT_RERANKER_MODEL",
     "MemoryUnavailable",
     "check_availability",
     "default_db_path",

@@ -19,7 +19,7 @@ _MCP_DIR = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(_MCP_DIR))
 
 import memory_tools  # noqa: E402
-from memory.availability import check_availability  # noqa: E402
+from memory.availability import MemoryUnavailable, check_availability  # noqa: E402
 
 # Subprocess script: block the optional heavy deps entirely (via a find_spec
 # meta-path finder), then confirm the server still imports, the card tools still
@@ -153,6 +153,7 @@ _AVAILABLE = {
     "available": True,
     "storage_available": True,
     "embedder_available": True,
+    "reranker_available": True,
     "sqlite_backend": "pysqlite3",
     "missing": [],
     "hint": "",
@@ -221,6 +222,57 @@ class TestMemoryToolsHappyPath(unittest.TestCase):
         self.assertEqual(result["count"], 1)
         self.assertIn("quick brown fox", result["results"][0]["text"])
 
+    def test_rerank_happy_path_reorders_and_annotates(self):
+        # rerank=True routes through a (stubbed) reranker; results carry the
+        # reranked flag and each row gets a rerank_score. No model is downloaded.
+        for name in ("cats.txt", "dogs.txt", "widget.txt"):
+            (Path(self._tmp.name) / name).write_text(
+                {
+                    "cats.txt": "A small domesticated feline that purrs.",
+                    "dogs.txt": "A loyal canine companion that barks.",
+                    "widget.txt": "Replacement part serial ZX-9000 in warehouse stock.",
+                }[name],
+                encoding="utf-8",
+            )
+
+        class _StubReranker:
+            model_name = "stub-reranker"
+
+            def score(self, query, texts):
+                # Prefer the warehouse/widget text so ordering visibly changes.
+                return [10.0 if "warehouse" in t else 0.0 for t in texts]
+
+        import memory.reranker as reranker
+
+        with patch.object(memory_tools, "check_availability", return_value=_AVAILABLE):
+            with patch.object(self._embeddings, "get_default_embedder", return_value=_StubEmbedder384()):
+                memory_tools.memory_ingest(str(Path(self._tmp.name)))
+                with patch.object(reranker, "get_default_reranker", return_value=_StubReranker()):
+                    result = memory_tools.memory_query("anything", top_k=3, rerank=True)
+        self.assertTrue(result["available"])
+        self.assertTrue(result["reranked"])
+        self.assertGreaterEqual(result["count"], 1)
+        self.assertTrue(all("rerank_score" in r for r in result["results"]))
+        self.assertIn("warehouse", result["results"][0]["text"])
+
+    def test_rerank_unavailable_model_returns_clean_unavailable(self):
+        # Deps present (gate passes) but the reranker MODEL cannot load ->
+        # MemoryUnavailable -> clean unavailable result, never a crash.
+        import memory.reranker as reranker
+
+        def _boom():
+            raise MemoryUnavailable("reranker model 'x' could not be loaded")
+
+        with patch.object(memory_tools, "check_availability", return_value=_AVAILABLE):
+            with patch.object(self._embeddings, "get_default_embedder", return_value=_StubEmbedder384()):
+                with patch.object(reranker, "get_default_reranker", side_effect=_boom):
+                    result = memory_tools.memory_query("q", rerank=True)
+        # Routes through the established "unavailable" contract, never a crash.
+        self.assertFalse(result["available"])
+        self.assertEqual(result["operation"], "memory_query")
+        self.assertIn("reranker model", result["error"])
+        self.assertIn("hint", result)
+
     def test_query_bad_top_k_returns_stable_error_shape(self):
         with patch.object(memory_tools, "check_availability", return_value=_AVAILABLE):
             with patch.object(self._embeddings, "get_default_embedder", return_value=_StubEmbedder384()):
@@ -232,6 +284,36 @@ class TestMemoryToolsHappyPath(unittest.TestCase):
         self.assertEqual(result["count"], 0)
         self.assertEqual(result["results"], [])
         self.assertIn("top_k", result)
+        self.assertIn("max_per_doc", result)
+
+    def test_query_threads_and_echoes_max_per_doc(self):
+        note = Path(self._tmp.name) / "note.txt"
+        note.write_text("The quick brown fox jumps.", encoding="utf-8")
+        with patch.object(memory_tools, "check_availability", return_value=_AVAILABLE):
+            with patch.object(self._embeddings, "get_default_embedder", return_value=_StubEmbedder384()):
+                memory_tools.memory_ingest(str(note))
+                result = memory_tools.memory_query("quick fox", top_k=3, max_per_doc=1)
+        self.assertTrue(result["available"])
+        self.assertEqual(result["operation"], "memory_query")
+        self.assertEqual(result["max_per_doc"], 1)
+        # The default (1, dedup on) is echoed; an explicit None (opt-out) is too.
+        with patch.object(memory_tools, "check_availability", return_value=_AVAILABLE):
+            with patch.object(self._embeddings, "get_default_embedder", return_value=_StubEmbedder384()):
+                default = memory_tools.memory_query("quick fox", top_k=3)
+                opted_out = memory_tools.memory_query("quick fox", top_k=3, max_per_doc=None)
+        self.assertEqual(default["max_per_doc"], 1)
+        self.assertIsNone(opted_out["max_per_doc"])
+
+    def test_query_bad_max_per_doc_returns_stable_error_shape(self):
+        with patch.object(memory_tools, "check_availability", return_value=_AVAILABLE):
+            with patch.object(self._embeddings, "get_default_embedder", return_value=_StubEmbedder384()):
+                result = memory_tools.memory_query("anything", max_per_doc=0)
+        # The store's ValueError surfaces verbatim through the stable error shape.
+        self.assertTrue(result["available"])
+        self.assertIn("max_per_doc", result["error"])
+        self.assertEqual(result["operation"], "memory_query")
+        self.assertEqual(result["count"], 0)
+        self.assertEqual(result["results"], [])
 
     def test_unexpected_exception_is_sanitized(self):
         def boom():

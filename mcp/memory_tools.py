@@ -25,6 +25,7 @@ from graph_io import log
 from memory.availability import (
     DEFAULT_EMBEDDING_DIM,
     DEFAULT_EMBEDDING_MODEL,
+    DEFAULT_RERANKER_MODEL,
     MemoryUnavailable,
     check_availability,
     default_db_path,
@@ -123,6 +124,9 @@ def memory_query(
     source_type: Optional[str] = None,
     date_from: Optional[str] = None,
     date_to: Optional[str] = None,
+    rerank: bool = False,
+    rerank_pool: Optional[int] = None,
+    max_per_doc: Optional[int] = 1,
 ) -> dict:
     """Hybrid retrieval over the central memory store.
 
@@ -130,8 +134,28 @@ def memory_query(
     (k=60).  Optional filters: ``source_type`` and a ``date_from``/``date_to``
     range (matched against ``published_at``, falling back to ``ingested_at``).
     Returns the top_k chunks with text, ids, document metadata, and fusion score.
+
+    Optional ``rerank`` (default False; Phase 3a): when True, hybrid fusion first
+    collects a larger candidate pool (``rerank_pool``, default 50), a local
+    cross-encoder reranker rescores each ``(query, chunk)`` pair, and the top_k by
+    that score are returned — each with an added ``rerank_score``.  The reranker
+    runs on the same sentence-transformers runtime as the embedder; if its model
+    is unavailable the tool returns a clean "unavailable" result, never a crash.
+
+    ``max_per_doc`` (default 1): keeps at most that many chunks per source
+    document, backfilling the freed slots with further DISTINCT documents so
+    top_k surfaces distinct conversations instead of several chunks of one
+    crowding it out.  It is applied AFTER fusion and rerank (so the top-ranked
+    chunk of each doc is kept), adds no model and no latency, and composes with
+    ``rerank``.  Pass ``max_per_doc=None`` to disable de-duplication and return
+    raw chunks (several chunks of one conversation may then fill top_k);
+    ``rerank=False`` with ``max_per_doc=None`` is identical to the base hybrid
+    query.
     """
-    error_extra = {"query": query, "top_k": top_k, "count": 0, "results": []}
+    error_extra = {
+        "query": query, "top_k": top_k, "count": 0, "results": [],
+        "reranked": bool(rerank), "max_per_doc": max_per_doc,
+    }
 
     def _do() -> dict:
         if not isinstance(top_k, int) or isinstance(top_k, bool) or top_k < 1 or top_k > _MAX_TOP_K:
@@ -140,6 +164,14 @@ def memory_query(
 
         store = _new_store()
         embedder = get_default_embedder()
+        reranker = None
+        if rerank:
+            # Built only when reranking is requested, so the base query path never
+            # loads the cross-encoder.  An absent dep / model raises
+            # MemoryUnavailable, which _run turns into a clean unavailable result.
+            from memory.reranker import get_default_reranker
+
+            reranker = get_default_reranker()
         results = store.query(
             embedder,
             query,
@@ -147,13 +179,22 @@ def memory_query(
             source_type=source_type,
             date_from=date_from,
             date_to=date_to,
+            rerank=rerank,
+            reranker=reranker,
+            rerank_pool=rerank_pool,
+            max_per_doc=max_per_doc,
         )
-        log(f"memory_query {query!r}: {len(results)} results")
+        log(
+            f"memory_query {query!r}: {len(results)} results "
+            f"(rerank={bool(rerank)}, max_per_doc={max_per_doc})"
+        )
         return {
             "available": True,
             "operation": "memory_query",
             "query": query,
             "top_k": top_k,
+            "reranked": bool(rerank),
+            "max_per_doc": max_per_doc,
             "count": len(results),
             "results": results,
         }
@@ -178,11 +219,16 @@ def memory_status() -> dict:
     except OSError:
         db_exists, db_size = False, 0
 
+    # Effective reranker model (env override wins), for observability.  Reported
+    # even when unavailable so callers can see what would be used once installed.
+    reranker_model = os.environ.get("AGENT_OS_MEMORY_RERANKER_MODEL", "").strip() or DEFAULT_RERANKER_MODEL
+
     status = {
         **availability,
         "operation": "memory_status",
         "embedding_model": DEFAULT_EMBEDDING_MODEL,
         "embedding_dim": DEFAULT_EMBEDDING_DIM,
+        "reranker_model": reranker_model,
         "db_path": str(db_path),
         "db_exists": db_exists,
         "db_size_bytes": db_size,
