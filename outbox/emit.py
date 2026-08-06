@@ -183,33 +183,69 @@ AGENT_STARTED = "agent.started"
 AGENT_FINISHED = "agent.finished"
 
 
-def _task_payload(card_id, title, status, priority) -> Dict[str, Any]:
-    return {"card_id": card_id, "title": title, "status": status, "priority": priority}
+def _task_payload(
+    card_id, title, status, priority, *, global_id=None, version=None, description=None
+) -> Dict[str, Any]:
+    """A tiny, TaskRecord-shaped task payload (proposal §14.1).
+
+    The base four keys (``card_id`` = the local card id, ``title``, ``status`` =
+    the LOCAL lifecycle string, ``priority``) are always present.  The Phase 2a
+    sync keys (``global_id`` = ``task_`` ULID, ``version``, ``description``) are
+    added ONLY when supplied — so a caller that has not minted a global id (e.g. a
+    bare checkout without ``contracts``) still emits a valid, inert task event, and
+    the pre-sync payload shape is preserved byte-for-byte.
+    """
+    payload: Dict[str, Any] = {
+        "card_id": card_id, "title": title, "status": status, "priority": priority,
+    }
+    if global_id is not None:
+        payload["global_id"] = global_id
+    if version is not None:
+        payload["version"] = version
+    if description is not None:
+        payload["description"] = description
+    return payload
 
 
-def _emit_task(event_type: str, repo_root, *, card_id, title, status, priority) -> Optional[str]:
+def _emit_task(
+    event_type: str, repo_root, *, card_id, title, status, priority,
+    global_id=None, version=None, description=None,
+) -> Optional[str]:
     """Shared body for the three task emitters (identical but for the type)."""
     return emit_event(
         repo_root,
         event_type,
-        _task_payload(card_id, title, status, priority),
+        _task_payload(card_id, title, status, priority,
+                      global_id=global_id, version=version, description=description),
         task_id=card_id,
     )
 
 
-def emit_task_created(repo_root, *, card_id, title, status, priority) -> Optional[str]:
+def emit_task_created(
+    repo_root, *, card_id, title, status, priority,
+    global_id=None, version=None, description=None,
+) -> Optional[str]:
     return _emit_task(TASK_CREATED, repo_root, card_id=card_id, title=title,
-                      status=status, priority=priority)
+                      status=status, priority=priority, global_id=global_id,
+                      version=version, description=description)
 
 
-def emit_task_updated(repo_root, *, card_id, title, status, priority) -> Optional[str]:
+def emit_task_updated(
+    repo_root, *, card_id, title, status, priority,
+    global_id=None, version=None, description=None,
+) -> Optional[str]:
     return _emit_task(TASK_UPDATED, repo_root, card_id=card_id, title=title,
-                      status=status, priority=priority)
+                      status=status, priority=priority, global_id=global_id,
+                      version=version, description=description)
 
 
-def emit_task_completed(repo_root, *, card_id, title, status, priority) -> Optional[str]:
+def emit_task_completed(
+    repo_root, *, card_id, title, status, priority,
+    global_id=None, version=None, description=None,
+) -> Optional[str]:
     return _emit_task(TASK_COMPLETED, repo_root, card_id=card_id, title=title,
-                      status=status, priority=priority)
+                      status=status, priority=priority, global_id=global_id,
+                      version=version, description=description)
 
 
 def emit_repo_graph_updated(repo_root) -> Optional[str]:

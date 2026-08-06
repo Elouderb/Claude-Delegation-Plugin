@@ -246,6 +246,26 @@ def create_app(*, api_key: Optional[str] = None, store: Optional[Any] = None) ->
         next_after = events[-1].get("ingest_seq") if events else None
         return jsonify({"events": events, "next_after": next_after}), 200
 
+    # --------------------------------------------------- task down-read #
+    @app.get("/v1/tasks")
+    def list_tasks():
+        """Central task projections for DOWN-synchronization (Phase 2a).
+
+        Auth-required (via ``_require_auth``); mirrors ``/v1/events/recent`` but
+        pages FORWARD over the mutable registry.tasks read model by its
+        ROWVERSION-derived ``change_seq``: ``?since=`` fetches strictly-newer
+        changes and ``next_since`` is the continuation token (the largest
+        ``change_seq`` on this page, ``null`` when the caller is caught up). A
+        down-projection poller filters ``?repository_id=`` to the source repo it
+        is applying.
+        """
+        repository_id = request.args.get("repository_id") or None
+        since = _parse_after_seq(request.args.get("since"))
+        limit = _parse_limit(request.args.get("limit"))
+        tasks = store.list_tasks(repository_id=repository_id, since=since, limit=limit)
+        next_since = tasks[-1].get("change_seq") if tasks else None
+        return jsonify({"tasks": tasks, "next_since": next_since}), 200
+
     # -------------------------------------------------------- sync cursors #
     @app.get("/v1/sync/<client_id>")
     def get_sync_cursor(client_id: str):

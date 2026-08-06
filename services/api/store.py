@@ -69,6 +69,7 @@ from typing import Any, Callable, Dict, List, Optional, Tuple
 # ``database`` / ``contracts`` resolve because this package is imported from the
 # repo root (see services/api/__main__.py and the test-suite sys.path convention).
 from database.events import to_utc
+from contracts.tasks import local_status_to_sync
 
 # Allowed agent-session status values — mirrors contracts.registry.AgentStatus and
 # the CK_registry_agent_sessions_status CHECK constraint. Kept here so the store
@@ -80,6 +81,15 @@ ALLOWED_STATUSES = ("starting", "running", "waiting", "failed", "finished")
 # row (see the module docstring's "Session read model").
 _AGENT_STARTED = "agent.started"
 _AGENT_FINISHED = "agent.finished"
+
+# Task-lifecycle event types that materialize a registry.tasks row (Phase 2a
+# down-projection read model — see the "Task read model" note below). Only a
+# task event carrying a ``global_id`` in its payload participates; a pre-Phase-2a
+# task event (no global id) stays inert, exactly as before.
+_TASK_CREATED = "task.created"
+_TASK_UPDATED = "task.updated"
+_TASK_COMPLETED = "task.completed"
+_TASK_EVENT_TYPES = (_TASK_CREATED, _TASK_UPDATED, _TASK_COMPLETED)
 
 # Max chars kept in ops.ingest_errors.reason (the column is NVARCHAR(1000)).
 _MAX_REASON_CHARS = 1000
@@ -490,6 +500,10 @@ class SqlStore:
         # docstring: the event log has no FK to registry.*, so it must never be
         # blocked by a session row whose machine/repo isn't registered.
         self._materialize_sessions(inserted_envelopes)
+        # Task down-projection read model (Phase 2a) — same posture as sessions:
+        # a SEPARATE best-effort pass on its own connection, after the FK-free
+        # event log has committed.
+        self._materialize_tasks(inserted_envelopes)
         return [o for o in outcomes if o is not None]
 
     @staticmethod
@@ -577,6 +591,124 @@ class SqlStore:
                 env.session_id, env.agent_id, env.machine_id, env.repository_id,
                 payload.get("agent_type") or "agent", ended, ended, ended,
             )
+
+    # -- task read model (Phase 2a down-projection) ------------------------ #
+    def _materialize_tasks(self, envelopes: List[Any]) -> None:
+        """Upsert registry.tasks rows from accepted task.* events (Phase 2a).
+
+        Mirrors :meth:`_materialize_sessions`: best-effort and per-event isolated
+        (each task write is its own tiny transaction) so a bad row is rolled back
+        and skipped without poisoning the others or the already-committed event
+        log. Only ``task.created`` / ``task.updated`` / ``task.completed`` events
+        carrying a ``global_id`` payload participate.
+        """
+        task_events = [
+            e for e in envelopes
+            if e.event_type in _TASK_EVENT_TYPES and (e.payload or {}).get("global_id")
+        ]
+        if not task_events:
+            return
+        conn = self._connect()
+        try:
+            cur = conn.cursor()
+            for env in task_events:
+                try:
+                    self._materialize_task(cur, env)
+                    conn.commit()
+                except Exception:
+                    conn.rollback()  # skip this task; never fail the ingest
+        finally:
+            conn.close()
+
+    @staticmethod
+    def _materialize_task(cur, env: Any) -> None:
+        """Upsert one registry.tasks row from a task.* event (last-write-wins).
+
+        The central task carries the reconciliation metadata the NEXT slice needs
+        (version / updated_at / originating_client / repository_id /
+        last_status_event_id) but this slice resolves conflicts by simple
+        last-write-wins: the UPDATE only lands when the incoming ``version`` is
+        ``>=`` the stored one, so an out-of-order redelivery of an older event can
+        never clobber a newer materialized state, and an equal-version redelivery
+        re-applies identical content (idempotent). ``status`` is stored as the
+        normalized TaskSyncStatus value so the row round-trips a TaskRecord.
+        """
+        payload = env.payload or {}
+        global_id = payload.get("global_id")
+        if not global_id:
+            return
+        version = int(payload.get("version") or 1)
+        status = local_status_to_sync(payload.get("status"))
+        updated = to_utc(env.occurred_at)
+        cur.execute(
+            "UPDATE registry.tasks SET local_card_id = ?, repository_id = ?, "
+            "project_id = ?, title = ?, description = ?, priority = ?, status = ?, "
+            "version = ?, originating_client = ?, updated_at = ?, "
+            "last_status_event_id = ? WHERE global_id = ? AND ? >= version",
+            payload.get("card_id"), env.repository_id, env.project_id,
+            payload.get("title"), payload.get("description"), payload.get("priority"),
+            status, version, env.machine_id, updated, env.event_id,
+            global_id, version,
+        )
+        if cur.rowcount == 0:
+            # rowcount 0 means either the row does not exist yet, or an older/equal
+            # event lost the version guard against a newer stored state. INSERT only
+            # when genuinely absent; otherwise the stored (newer) row wins.
+            cur.execute("SELECT 1 FROM registry.tasks WHERE global_id = ?", global_id)
+            if cur.fetchone() is None:
+                cur.execute(
+                    "INSERT INTO registry.tasks (global_id, local_card_id, repository_id, "
+                    "project_id, title, description, priority, status, version, "
+                    "originating_client, updated_at, last_status_event_id) "
+                    "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                    global_id, payload.get("card_id"), env.repository_id, env.project_id,
+                    payload.get("title"), payload.get("description"), payload.get("priority"),
+                    status, version, env.machine_id, updated, env.event_id,
+                )
+
+    def list_tasks(
+        self,
+        *,
+        repository_id: Optional[str] = None,
+        since: Optional[int] = None,
+        limit: int = 50,
+    ) -> List[Dict[str, Any]]:
+        """Tasks in change order by ``change_seq`` (a ROWVERSION-derived total order).
+
+        ``change_seq`` (``CONVERT(BIGINT, registry.tasks.change_seq)``) advances on
+        every upsert of a row — including an in-place UPDATE — so, unlike an
+        insert-only IDENTITY, it drives a keyset cursor over a MUTABLE read model:
+        pass ``since`` = the largest ``change_seq`` from the previous page to fetch
+        strictly-newer changes. Ordered ASC (oldest change first) so a poller walks
+        forward with ``since``; each row carries its ``change_seq`` so the poller
+        can advance the cursor.
+        """
+        conn = self._connect()
+        try:
+            cur = conn.cursor()
+            where: List[str] = []
+            params: List[Any] = [int(limit)]
+            if since is not None:
+                # rowversion compares as big-endian binary(8); casting the bigint
+                # cursor back to binary(8) keeps the predicate sargable (no function
+                # on the indexed column).
+                where.append("change_seq > CONVERT(BINARY(8), CAST(? AS BIGINT))")
+                params.append(int(since))
+            if repository_id is not None:
+                where.append("repository_id = ?")
+                params.append(repository_id)
+            clause = (" WHERE " + " AND ".join(where)) if where else ""
+            cur.execute(
+                "SELECT TOP (?) global_id, local_card_id, repository_id, project_id, "
+                "title, description, priority, status, status_reason, version, "
+                "originating_client, updated_at, last_status_event_id, "
+                "CONVERT(BIGINT, change_seq) AS change_seq "
+                "FROM registry.tasks" + clause + " ORDER BY change_seq ASC",
+                *params,
+            )
+            return [_serialize_row(r) for r in self._rows(cur)]
+        finally:
+            conn.close()
 
     # -- read surface ------------------------------------------------------ #
     def list_machines(self) -> List[Dict[str, Any]]:
@@ -797,6 +929,8 @@ class FakeStore:
         self.raise_on_ingest = raise_on_ingest
         self._seq = 0  # mirrors ops.events.ingest_seq (monotonic arrival order)
         self.sync_cursors: Dict[str, Dict[str, Any]] = {}  # mirrors ops.sync_cursors
+        self.tasks: Dict[str, Dict[str, Any]] = {}  # mirrors registry.tasks (by global_id)
+        self._task_seq = 0  # mirrors registry.tasks.change_seq (ROWVERSION)
 
     def upsert_machine(self, *, machine_id, name, os, created_at) -> Dict[str, Any]:
         created = machine_id not in self.machines
@@ -901,7 +1035,43 @@ class FakeStore:
             outcomes.append({"index": index, "event_id": event_id, "outcome": "accepted"})
         for env in accepted_envelopes:
             self._materialize_session(env)
+            self._materialize_task(env)
         return outcomes
+
+    def _materialize_task(self, env: Any) -> None:
+        """Mirror SqlStore task materialization (Phase 2a) from task.* events.
+
+        Same last-write-wins guard as SqlStore: an older-version event never
+        clobbers a newer stored row; every accepted upsert bumps ``change_seq``
+        (the ROWVERSION analogue) so the keyset read stays consistent with SQL.
+        """
+        if env.event_type not in _TASK_EVENT_TYPES:
+            return
+        payload = env.payload or {}
+        global_id = payload.get("global_id")
+        if not global_id:
+            return
+        version = int(payload.get("version") or 1)
+        existing = self.tasks.get(global_id)
+        if existing is not None and version < int(existing.get("version") or 1):
+            return  # older event — do not clobber newer state (last-write-wins)
+        self._task_seq += 1
+        self.tasks[global_id] = {
+            "global_id": global_id,
+            "local_card_id": payload.get("card_id"),
+            "repository_id": env.repository_id,
+            "project_id": env.project_id,
+            "title": payload.get("title"),
+            "description": payload.get("description"),
+            "priority": payload.get("priority"),
+            "status": local_status_to_sync(payload.get("status")),
+            "status_reason": None,
+            "version": version,
+            "originating_client": env.machine_id,
+            "updated_at": _iso(env.occurred_at),
+            "last_status_event_id": env.event_id,
+            "change_seq": self._task_seq,
+        }
 
     def _materialize_session(self, env: Any) -> None:
         """Mirror SqlStore session materialization from agent.started/finished."""
@@ -965,6 +1135,16 @@ class FakeStore:
         if event_type is not None:
             rows = [r for r in rows if r.get("event_type") == event_type]
         return rows[: int(limit)]
+
+    def list_tasks(self, *, repository_id=None, since=None, limit=50):
+        # Mirror SqlStore: oldest-change-first by the monotonic change_seq, honoring
+        # the same `since` keyset cursor and optional repository filter.
+        rows = sorted(self.tasks.values(), key=lambda r: r["change_seq"])
+        if since is not None:
+            rows = [r for r in rows if r["change_seq"] > int(since)]
+        if repository_id is not None:
+            rows = [r for r in rows if r.get("repository_id") == repository_id]
+        return [dict(r) for r in rows[: int(limit)]]
 
     # -- ops.sync_cursors (Phase 1d) --------------------------------------- #
     def get_sync_cursor(self, *, client_id: str) -> Optional[Dict[str, Any]]:
