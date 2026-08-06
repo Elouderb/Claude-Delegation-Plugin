@@ -13,10 +13,12 @@ from __future__ import annotations
 import importlib.util
 import json
 import os
+import shutil
 import sys
 import tempfile
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 _REPO_ROOT = Path(__file__).resolve().parent.parent.parent
 _INSTALLER_DIR = _REPO_ROOT / "installer"
@@ -116,6 +118,58 @@ class TestHandshakeFailurePath(unittest.TestCase):
         )
         self.assertFalse(result.ok)
         self.assertIn("IMPORT BOOM", result.stderr)
+
+
+class TestCheckGraphify(unittest.TestCase):
+    """Unit coverage for the soft post-install ``graphify``-resolution check
+    (card 43ba7d28). Uses the same os.name-conditional path shape as the
+    function under test, so a single test body is correct on POSIX and
+    Windows without patching ``os.name`` itself (unlike the platform-specific
+    ``sys.executable`` fixtures in test_resolve_graphify.py's battery)."""
+
+    def setUp(self):
+        self._tmp = tempfile.mkdtemp(prefix="agent_os_checkgraphify_")
+        self.addCleanup(shutil.rmtree, self._tmp, True)
+        self.tmp = Path(self._tmp)
+        self._bin_name = "Scripts" if os.name == "nt" else "bin"
+        self._graphify_name = "graphify.exe" if os.name == "nt" else "graphify"
+        # Never let a stray AGENT_OS_GRAPHIFY_EXECUTABLE from the outer
+        # environment leak into a test that doesn't set it explicitly.
+        self._env_patch = patch.dict(os.environ, {}, clear=False)
+        self._env_patch.start()
+        os.environ.pop("AGENT_OS_GRAPHIFY_EXECUTABLE", None)
+        self.addCleanup(self._env_patch.stop)
+
+    def test_env_override_existing_file_resolves(self):
+        override = self.tmp / "custom-graphify"
+        override.write_text("", encoding="utf-8")
+        os.environ["AGENT_OS_GRAPHIFY_EXECUTABLE"] = str(override)
+        self.assertIsNone(vi.check_graphify(self.tmp))
+
+    def test_env_override_missing_reports_diagnostic(self):
+        os.environ["AGENT_OS_GRAPHIFY_EXECUTABLE"] = str(self.tmp / "nope")
+        with patch.object(shutil, "which", return_value=None):
+            issue = vi.check_graphify(self.tmp)
+        self.assertIsNotNone(issue)
+        self.assertIn("AGENT_OS_GRAPHIFY_EXECUTABLE", issue)
+
+    def test_found_beside_venv_interpreter(self):
+        exe_dir = self.tmp / ".venv" / self._bin_name
+        exe_dir.mkdir(parents=True)
+        (exe_dir / self._graphify_name).write_text("", encoding="utf-8")
+        with patch.object(shutil, "which", return_value=None):
+            self.assertIsNone(vi.check_graphify(self.tmp))
+
+    def test_path_fallback_resolves(self):
+        with patch.object(shutil, "which", return_value="/usr/local/bin/graphify"):
+            self.assertIsNone(vi.check_graphify(self.tmp))
+
+    def test_not_found_anywhere_reports_diagnostic(self):
+        with patch.object(shutil, "which", return_value=None):
+            issue = vi.check_graphify(self.tmp)
+        self.assertIsNotNone(issue)
+        self.assertIn("graphify", issue)
+        self.assertIn("mcp/graph_requirements.txt", issue)
 
 
 @unittest.skipIf(os.name == "nt", "POSIX end-to-end handshake (card-scoped)")

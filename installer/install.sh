@@ -9,12 +9,17 @@
 #
 # Usage:
 #   installer/install.sh [--with-db] [--with-memory] [--all-extras]
-#                        [--no-extras] [--non-interactive|-y] [-h|--help]
+#                        [--no-extras] [--no-graph]
+#                        [--non-interactive|-y] [-h|--help]
 #
 # Non-interactive selection (for CI) can also be driven by environment:
 #   AGENT_OS_NONINTERACTIVE=1   never prompt (implied by CI=1 or a non-tty stdin)
 #   AGENT_OS_INSTALL_DB=1       install the database extra (pyodbc, networkx, pyvis)
 #   AGENT_OS_INSTALL_MEMORY=1   install the memory extra (sqlite-vec, ...)
+#   AGENT_OS_INSTALL_GRAPH=0    skip the code-graph extra (graphifyy); it is
+#                               installed by DEFAULT (unlike db/memory above)
+#                               because the code graph is a headline, always-on
+#                               plugin capability, not an opt-in extra.
 #   AGENT_OS_PYTHON=python3.12  interpreter used to create the venv (default python3)
 
 set -euo pipefail
@@ -27,6 +32,10 @@ VENV_PY="$VENV_DIR/bin/python"
 
 WITH_DB="${AGENT_OS_INSTALL_DB:-0}"
 WITH_MEMORY="${AGENT_OS_INSTALL_MEMORY:-0}"
+# Default-ON, unlike the two above: the code graph (graphify skill,
+# graph_refresh hooks, Flask graph UI) is a headline plugin capability, not an
+# opt-in extra. Opt out with --no-graph / AGENT_OS_INSTALL_GRAPH=0.
+WITH_GRAPH="${AGENT_OS_INSTALL_GRAPH:-1}"
 NONINTERACTIVE="${AGENT_OS_NONINTERACTIVE:-0}"
 BASE_PYTHON="${AGENT_OS_PYTHON:-python3}"
 
@@ -47,8 +56,10 @@ while [ "$#" -gt 0 ]; do
     case "$1" in
         --with-db)          WITH_DB=1 ;;
         --with-memory)      WITH_MEMORY=1 ;;
+        --with-graph)       WITH_GRAPH=1 ;;
         --all-extras)       WITH_DB=1; WITH_MEMORY=1 ;;
         --no-extras)        WITH_DB=0; WITH_MEMORY=0; NONINTERACTIVE=1 ;;
+        --no-graph)         WITH_GRAPH=0 ;;
         -y|--non-interactive) NONINTERACTIVE=1 ;;
         -h|--help)          usage; exit 0 ;;
         *) echo "Unknown option: $1" >&2; usage; exit 2 ;;
@@ -83,6 +94,20 @@ fi
 # --- 3. Core dependencies ----------------------------------------------------
 echo "Installing core dependencies (mcp/requirements.txt) ..."
 "$VENV_PY" -m pip install --quiet -r "$MCP_DIR/requirements.txt"
+
+# --- 3b. Code-graph extra (default ON; opt out with --no-graph) -------------
+# Unlike the db/memory extras below, this is not prompted -- it is installed
+# unless explicitly disabled, because a fresh install without it silently
+# degrades the graphify skill, graph_refresh hooks, and the graph UI (card
+# 43ba7d28: "Graphify executable not found" on a clean machine).
+# Off ONLY if explicitly "0" (matches install.ps1 + the documented
+# AGENT_OS_INSTALL_GRAPH=0 semantics); any other value, or unset, installs it.
+if [ "$WITH_GRAPH" != "0" ]; then
+    echo "Installing code-graph extra (mcp/graph_requirements.txt) ..."
+    "$VENV_PY" -m pip install --quiet -r "$MCP_DIR/graph_requirements.txt"
+else
+    echo "Skipping code-graph extra (--no-graph): the graphify skill, graph_refresh hooks, and graph UI will report 'Graphify executable not found' until 'pip install -r mcp/graph_requirements.txt' is run manually."
+fi
 
 # --- 4. Optional extras ------------------------------------------------------
 prompt_yes_no() {

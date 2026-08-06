@@ -1,0 +1,46 @@
+# Optional dependencies for the CODE-GRAPH subsystem: the `graphify` console
+# script that the graphify skill, the graph_refresh lifecycle hooks,
+# scripts/sync_repo_graph.py, and mcp/shared_graph_tools.py all shell out to.
+#
+# PyPI package name is `graphifyy` (note the double "y") -- the console script
+# it installs is `graphify`. See WINDOWS.md Section 2 and Appendix for the
+# name-mismatch history; do not "fix" the double-y, it is correct.
+#
+# --- Why this is a DEFAULT install, unlike db/memory ------------------------
+# mcp/db_requirements.txt and mcp/memory_requirements.txt are genuinely
+# optional: they need an external SQL Server or a downloaded embedding model,
+# and the tools they back report themselves "unavailable" gracefully when
+# absent. The code graph is different -- the graphify skill, the
+# graph_refresh hooks, resolve_graphify()'s callers, and the Flask graph UI
+# all assume `graphify` resolves, and its absence degrades a headline,
+# always-on plugin capability with a runtime hook warning ("Graphify
+# executable not found") rather than a clean "unavailable" report. So the
+# installers (installer/install.sh, installer/install.ps1) install this file
+# by DEFAULT -- opt out with --no-graph / -NoGraph if you only need task
+# cards. Direct install:
+#     pip install -r mcp/graph_requirements.txt
+#
+# --- Footprint / license -----------------------------------------------------
+# Pulls ~29 packages: networkx, numpy (~17MB wheel), rapidfuzz, tree-sitter,
+# and ~26 tree-sitter-<language> grammar packages (one per supported source
+# language). All of them ship prebuilt manylinux/win/macos wheels for the
+# cpython versions this plugin targets -- no compiler or source build
+# required (verified 2026-08-05: `pip install graphifyy==0.9.32` into a
+# throwaway venv resolved entirely from cached/prebuilt wheels in ~14s).
+# License: 0.9.x is Apache-2.0 (the older 0.8.39 line some machines already
+# have ambiently was MIT; NOTICE in the 0.9.x dist-info confirms the pre-
+# relicensing MIT-contributed portions remain available under their original
+# terms). Both are permissive OSS licenses -- no license or size blocker for a
+# default dependency.
+#
+# --- Version -----------------------------------------------------------------
+# Pinned to 0.9.32, verified (2026-08-05) to install cleanly and to run
+# `graphify update . --force` -- the exact invocation used by
+# mcp/shared_graph_tools.py's graph_refresh() and
+# scripts/hook_common.py's graphify_command() -- without error. 0.9.34 (the
+# PyPI latest at time of writing) was also spot-checked and behaves the same,
+# hence no upper bound. If a future release misbehaves, the known-good
+# fallback is 0.8.39 (the version several existing machines already have
+# ambiently, via a pyenv-level shim that was never declared anywhere --
+# exactly the gap this file closes).
+graphifyy>=0.9.32

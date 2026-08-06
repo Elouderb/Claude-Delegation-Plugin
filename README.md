@@ -45,15 +45,18 @@ installer/install.sh
 # 3. Then /reload-plugins (or restart Claude Code). Verify the server with /mcp.
 ```
 
-Both installers accept the same optional extras (prompted interactively, or
-selected non-interactively for CI):
+Both installers accept the same three extras. The code-graph extra is
+installed **by default** (opt out if you only need task cards); the
+database and central-memory extras are opt-in, prompted interactively, or
+selected non-interactively for CI:
 
 | Selection | Flag (both) | Environment |
 |-----------|-------------|-------------|
-| Database-graph extra (`pyodbc`, `networkx`, `pyvis`) | `--with-db` / `-WithDb` | `AGENT_OS_INSTALL_DB=1` |
-| Central-memory extra (`sqlite-vec`, …) | `--with-memory` / `-WithMemory` | `AGENT_OS_INSTALL_MEMORY=1` |
-| Both | `--all-extras` / `-AllExtras` | — |
-| Neither (force both off, no prompt) | `--no-extras` / `-NoExtras` | — |
+| Code-graph extra (`graphifyy`; installs the `graphify` console script) — **default ON** | `--no-graph` / `-NoGraph` to skip | `AGENT_OS_INSTALL_GRAPH=0` |
+| Database-graph extra (`pyodbc`, `networkx`, `pyvis`) — opt-in | `--with-db` / `-WithDb` | `AGENT_OS_INSTALL_DB=1` |
+| Central-memory extra (`sqlite-vec`, …) — opt-in | `--with-memory` / `-WithMemory` | `AGENT_OS_INSTALL_MEMORY=1` |
+| Both db + memory | `--all-extras` / `-AllExtras` | — |
+| Neither db nor memory (force off, no prompt; does **not** affect the graph extra) | `--no-extras` / `-NoExtras` | — |
 | Never prompt | `-y` / `--non-interactive` / `-NonInteractive` | `AGENT_OS_NONINTERACTIVE=1` (implied by `CI`) |
 | Interpreter for the venv | — (env only) | `AGENT_OS_PYTHON` (default `python3`; on Windows a `py -3.12`/`py -3` launcher probe) |
 
@@ -87,8 +90,22 @@ generate them; re-running it any time is safe and idempotent.
 > `claude --plugin-dir /path/to/agent-os`. This is a dev convenience, not the
 > primary install path.
 
-`graphify` must be on your `PATH` for the code/database graph features and the
-graph-sync hooks (which run `graphify update .`) to work.
+### Code-graph dependency (`graphifyy` → `graphify`)
+
+The graphify skill, the `graph_refresh` lifecycle hooks, and the Flask
+code-graph UI all shell out to a `graphify` console script, provided by the
+PyPI package `graphifyy` (note the double "y" — the package name and the
+console script it installs differ; see [`WINDOWS.md`](WINDOWS.md) §2 and
+Appendix). Both installers install `mcp/graph_requirements.txt` **by
+default** (opt out with `--no-graph` / `-NoGraph` if you only need task
+cards), so a fresh install has a resolvable `graphify` with no manual step —
+previously this package was undeclared anywhere and only present on machines
+where someone had `pip install`ed it by hand, so a clean install silently
+degraded the code-graph hooks ("Graphify executable not found"). Manual
+install: `pip install -r mcp/graph_requirements.txt`. See that file for the
+pinned version, footprint (~29 packages — networkx, numpy, rapidfuzz, and the
+per-language tree-sitter grammars — all prebuilt wheels, no compiler
+required), and license notes.
 
 ### Upgrading an existing install (from ≤ 0.2.7)
 
