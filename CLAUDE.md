@@ -23,7 +23,9 @@ absolute path for `@@PYTHON@@`), and verifies the result with a real MCP handsha
 
 ```bash
 # POSIX (Linux/macOS):
-installer/install.sh              # add --with-db / --with-memory / --all-extras
+installer/install.sh              # installs the code-graph extra by default;
+                                   # add --with-db / --with-memory / --all-extras;
+                                   # --no-graph opts out of the code-graph extra
 # Windows (PowerShell 5.1+):
 # powershell -ExecutionPolicy Bypass -File installer\install.ps1
 ```
@@ -253,6 +255,7 @@ Future features (not in scope yet):
 
 - `mcp/server.py` - Thin MCP entrypoint; tools live in `mcp/*_tools.py` modules
 - `mcp/requirements.txt` - Core dependencies (`mcp`, `flask`, `python-dotenv`)
+- `mcp/graph_requirements.txt` - Code-graph extra (`graphifyy`, providing the `graphify` console script); installed by DEFAULT by both installers (opt out with `--no-graph` / `-NoGraph`) since the code graph is a headline plugin capability, unlike the db/memory extras below. See `WINDOWS.md` §2 and Appendix for the `graphifyy`-vs-`graphify` name mismatch.
 - `mcp/db_requirements.txt` - Optional database-graph extras (`pyodbc`, `networkx`, `pyvis`)
 - `mcp/memory_tools.py` + `mcp/memory/` - Optional central memory subsystem (see above); `mcp/memory/reranker.py` is the Phase-3a cross-encoder reranker (shares the memory extras, no new dependency)
 - `mcp/memory_requirements.txt` - Optional memory extras (`sqlite-vec`, `pysqlite3-binary`, `sentence-transformers`; the reranker reuses these)
@@ -270,6 +273,7 @@ Future features (not in scope yet):
 - Cards are repository-local; each repo has its own database
 - The MCP server auto-initializes the database on first connection
 - The card subsystem requires no external services; the optional database-graph subsystem does (`pyodbc` + a live SQL Server)
+- **Code-graph dependency (card 43ba7d28):** the `graphify` console script (PyPI package `graphifyy`) that the graphify skill, `graph_refresh` hooks, and the graph UI all shell out to is installed via `mcp/graph_requirements.txt` — by DEFAULT, unlike the opt-in `--with-db` / `--with-memory` extras, because the code graph is a headline, always-on capability. Opt out with `--no-graph` / `-NoGraph` (or `AGENT_OS_INSTALL_GRAPH=0`) if you only need task cards. Before this fix `graphifyy` was undeclared anywhere; a fresh install had no path to it and the code-graph hooks silently warned "Graphify executable not found."
 - **Event emission (Phase 1b):** card create/update/complete, graph refreshes, and the session/subagent lifecycle hooks append a small validated `EventEnvelope` to `.agent-os/sync/outbox.jsonl`. It is best-effort and can never fail a card/graph/hook op. Kill-switch: set `AGENT_OS_EVENTS_DISABLED=1` to disable all emission. Durability: appends are not `fsync`ed per event by default (hot-path buffer); set `AGENT_OS_EVENTS_FSYNC=1` to force an `fsync` after every append.
 - **Network sync (Phase 1c), opt-in and OFF by default:** a drain worker (`outbox/drain.py`) ships outbox events to the central `/v1` API (`services/api/`) with a safe byte-offset cursor (a network outage costs a retry, never a lost or double-recorded event — ingest is idempotent on `event_id`). The MCP server spawns it as a background companion **only** when `AGENT_OS_SYNC=1` is set (mirrors the graph-server spawn: pdeathsig, respawn-on-crash, per-repo append log under `~/.agent-os/sync_worker-<repo>.log`, single-instance `.agent-os/sync/drain.pid` guard). With `AGENT_OS_SYNC` unset, no network process is ever created. Drain config: `AGENT_OS_API_URL` (default `http://127.0.0.1:8765`), `AGENT_OS_API_KEY`, `AGENT_OS_SYNC_INTERVAL`/`_BATCH`/`_TIMEOUT`, and the `AGENT_OS_SYNC_DISABLED=1` drain kill-switch. See `services/README.md`.
 - `.agent-os/` is auto-ignored by git: the plugin drops a self-protecting `.agent-os/.gitignore` (wildcard `*`) on first init, so `cards.sqlite` is never tracked. Do NOT commit the live SQLite file — committing it risks silently losing cards when `git reset --hard`, checkout, or rebase reverts the DB to an older snapshot. To share cards with teammates, use export rather than committing the live database. Note that `git clean -fdx` (the `-x` flag deletes ignored files) will still remove the ignored `.agent-os/` directory and its card DB — use `git clean -fd` without `-x`, or `-e .agent-os`, to preserve it.

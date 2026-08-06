@@ -23,6 +23,7 @@ import json
 import os
 import queue
 import re
+import shutil
 import subprocess
 import sys
 import threading
@@ -115,6 +116,53 @@ def load_command(
     command = _expandvars(str(entry["command"]), child_env)
     args = [_expandvars(str(a), child_env) for a in entry.get("args", [])]
     return command, args, child_env
+
+
+def check_graphify(plugin_root: Path) -> str | None:
+    """Best-effort check that the ``graphify`` console script will resolve.
+
+    Card 43ba7d28: ``graphifyy`` (the PyPI package providing the ``graphify``
+    console script the graphify skill, the graph_refresh hooks, and the graph
+    UI all depend on) was an undeclared, purely-ambient dependency -- a fresh
+    install had no path to it at all, and the only symptom was a silent,
+    repeated runtime hook warning ("Graphify executable not found"). This
+    turns that into a single, clear install-time signal instead.
+
+    Mirrors the resolution order of ``mcp/graph_io.py``'s and
+    ``scripts/hook_common.py``'s ``resolve_graphify()`` (env override, then a
+    console script beside the venv interpreter, then ``PATH``) closely enough
+    to give an accurate signal, without importing either module (this file
+    stays stdlib-only by design -- see the module docstring). Returns ``None``
+    when ``graphify`` resolves, or a short human-readable diagnostic when it
+    does not. Never raises.
+    """
+    override = os.environ.get("AGENT_OS_GRAPHIFY_EXECUTABLE")
+    if override:
+        if Path(override).exists() or shutil.which(override):
+            return None
+        return f"AGENT_OS_GRAPHIFY_EXECUTABLE={override!r} does not resolve"
+
+    venv_python = (
+        plugin_root
+        / ".venv"
+        / ("Scripts" if os.name == "nt" else "bin")
+        / ("python.exe" if os.name == "nt" else "python")
+    )
+    exe_dir = venv_python.parent
+    for name in ("graphify.exe", "graphify"):
+        if (exe_dir / name).exists():
+            return None
+
+    if shutil.which("graphify"):
+        return None
+
+    return (
+        f"'graphify' was not found beside {venv_python} or on PATH -- the "
+        "graphify skill, graph_refresh hooks, and graph UI will warn "
+        "\"Graphify executable not found\" until it is installed "
+        "(pip install -r mcp/graph_requirements.txt, or re-run the "
+        "installer without --no-graph / -NoGraph)."
+    )
 
 
 def _reader_thread(stream: Any, out_queue: "queue.Queue[Any]") -> None:
@@ -328,6 +376,14 @@ def main(argv: list[str] | None = None) -> int:
     except HandshakeError as exc:
         print(f"FAIL: {exc}", file=sys.stderr)
         return 1
+
+    # Soft check, independent of the handshake result: it never changes the
+    # exit code (graphify is not required for the MCP handshake itself -- the
+    # graph tools still register, they just degrade at call time), but it
+    # turns a silent runtime hook warning into a visible install-time one.
+    graphify_issue = check_graphify(args.plugin_root)
+    if graphify_issue:
+        print(f"WARNING: {graphify_issue}", file=sys.stderr)
 
     if result.ok:
         print(

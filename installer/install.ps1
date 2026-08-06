@@ -20,11 +20,21 @@
 .PARAMETER WithMemory
     Install the central-memory extra (sqlite-vec, pysqlite3-binary, sentence-transformers).
 
+.PARAMETER WithGraph
+    Install the code-graph extra (graphifyy). Installed by default; this switch
+    is only useful to override a prior -NoGraph / AGENT_OS_INSTALL_GRAPH=0.
+
 .PARAMETER AllExtras
-    Install both extras.
+    Install both the database and central-memory extras.
 
 .PARAMETER NoExtras
-    Install neither extra and do not prompt.
+    Install neither the database nor central-memory extra, and do not prompt.
+    Does not affect the code-graph extra -- use -NoGraph for that.
+
+.PARAMETER NoGraph
+    Skip the code-graph extra (graphifyy). It is installed by DEFAULT (unlike
+    -WithDb / -WithMemory above) because the code graph is a headline,
+    always-on plugin capability, not an opt-in extra.
 
 .PARAMETER NonInteractive
     Never prompt (implied by the CI environment variable). Use for automation.
@@ -36,8 +46,10 @@
 param(
     [switch]$WithDb,
     [switch]$WithMemory,
+    [switch]$WithGraph,
     [switch]$AllExtras,
     [switch]$NoExtras,
+    [switch]$NoGraph,
     [switch]$NonInteractive
 )
 
@@ -55,17 +67,25 @@ Write-Host "Installing agent-os plugin into: $PluginRoot"
 # --- Resolve extras / interactivity ------------------------------------------
 $doDb     = [bool]$WithDb
 $doMemory = [bool]$WithMemory
+# Default-ON, unlike the two above: the code graph (graphify skill,
+# graph_refresh hooks, Flask graph UI) is a headline plugin capability, not an
+# opt-in extra. Opt out with -NoGraph / AGENT_OS_INSTALL_GRAPH=0.
+$doGraph  = $true
 if ($AllExtras) { $doDb = $true; $doMemory = $true }
 
 if ($env:AGENT_OS_INSTALL_DB -eq '1')     { $doDb = $true }
 if ($env:AGENT_OS_INSTALL_MEMORY -eq '1') { $doMemory = $true }
+if ($env:AGENT_OS_INSTALL_GRAPH -eq '0')  { $doGraph = $false }
+if ($WithGraph) { $doGraph = $true }
 
 $interactive = -not $NonInteractive
 # -NoExtras must FORCE both extras off AND stop prompting, overriding any
 # AGENT_OS_INSTALL_* env vars set above — exactly matching `install.sh
 # --no-extras` (which zeroes WITH_DB/WITH_MEMORY after the env defaults). Placed
-# after the env checks so it wins.
+# after the env checks so it wins. -NoExtras deliberately does NOT touch
+# $doGraph (see -NoGraph, the separate opt-out for the default-on graph extra).
 if ($NoExtras) { $doDb = $false; $doMemory = $false; $interactive = $false }
+if ($NoGraph) { $doGraph = $false }
 if ($env:AGENT_OS_NONINTERACTIVE -eq '1') { $interactive = $false }
 if ($env:CI) { $interactive = $false }
 if (-not [Environment]::UserInteractive) { $interactive = $false }
@@ -140,6 +160,19 @@ if (-not (Test-Path $VenvPy)) {
 Write-Host "Installing core dependencies (mcp\requirements.txt) ..."
 & $VenvPy -m pip install --quiet -r (Join-Path $McpDir 'requirements.txt')
 if ($LASTEXITCODE -ne 0) { Write-Error "core dependency install failed."; exit 1 }
+
+# --- 3b. Code-graph extra (default ON; opt out with -NoGraph) ---------------
+# Unlike the db/memory extras below, this is not prompted -- it is installed
+# unless explicitly disabled, because a fresh install without it silently
+# degrades the graphify skill, graph_refresh hooks, and the graph UI (card
+# 43ba7d28: "Graphify executable not found" on a clean machine).
+if ($doGraph) {
+    Write-Host "Installing code-graph extra (mcp\graph_requirements.txt) ..."
+    & $VenvPy -m pip install --quiet -r (Join-Path $McpDir 'graph_requirements.txt')
+    if ($LASTEXITCODE -ne 0) { Write-Error "code-graph extra install failed."; exit 1 }
+} else {
+    Write-Host "Skipping code-graph extra (-NoGraph): the graphify skill, graph_refresh hooks, and graph UI will report 'Graphify executable not found' until 'pip install -r mcp\graph_requirements.txt' is run manually."
+}
 
 # --- 4. Optional extras ------------------------------------------------------
 if ($interactive) {

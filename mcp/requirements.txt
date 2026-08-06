@@ -17,10 +17,14 @@ python-dotenv   # app.py reads per-repo .env via dotenv_values()
 # explicitly. Permissive pin: any pydantic v2.
 pydantic>=2,<3  # contracts/ typed contract models
 
-# Optional extras live in their own files so this core set stays minimal (mcp,
-# flask, python-dotenv) and the installers can select them:
+# Extras live in their own files so this core set stays minimal (mcp, flask,
+# python-dotenv) and the installers can select them:
+#   - code-graph tools (graphify skill / graph_refresh / graph UI): mcp/graph_requirements.txt
+#     (graphifyy — installed by DEFAULT; opt out with --no-graph / AGENT_OS_INSTALL_GRAPH=0)
 #   - database-graph tools (db_* / SQL Server schema graph):  mcp/db_requirements.txt
-#     (pyodbc, networkx, pyvis)
+#     (pyodbc, networkx, pyvis) — opt-in
 #   - central memory (memory_* tools):                        mcp/memory_requirements.txt
-# The plugin installers (installer/install.sh, installer/install.ps1) prompt for
-# these or accept --with-db / --with-memory (see WINDOWS.md Section 5.4).
+#     (sqlite-vec, sentence-transformers, …) — opt-in
+# The plugin installers (installer/install.sh, installer/install.ps1) install the
+# graph extra by default and accept --with-db / --with-memory / --no-graph (see
+# WINDOWS.md Section 5.4).

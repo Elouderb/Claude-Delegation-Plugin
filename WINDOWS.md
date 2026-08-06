@@ -62,6 +62,12 @@ This fix is OS-agnostic: it checks `graphify.exe` then `graphify`, so it resolve
 `Scripts/graphify.exe` and `bin/graphify` alike. **Keep it that way** — any new
 call site should use the helper rather than a bare name.
 
+Resolution logic aside, a distinct bug existed one layer up: nothing actually
+declared `graphifyy` (the PyPI package providing this console script) as a
+dependency, so a genuinely fresh venv had nothing for `resolve_graphify()` to
+find. Fixed in card 43ba7d28 — see the Appendix update below and
+`mcp/graph_requirements.txt`.
+
 ## 3. Default text encoding is cp1252, not UTF-8
 
 This is the highest-value lesson in this document, because it fails *silently and
@@ -276,6 +282,16 @@ kept as-is.
 Environment used: Python 3.12.10 venv at `.venv/` with `mcp` 1.29.0, `flask`
 3.1.3, `python-dotenv` 1.2.2, `graphifyy` 0.9.31 (PyPI name is `graphifyy`; the
 console script it installs is `graphify`), `pyodbc` 5.3.0, `pyvis` 0.3.2.
+
+**Update (card 43ba7d28, 2026-08-05):** at the time this appendix was written,
+`graphifyy` was present only because it had been `pip install`ed by hand — it
+was not declared in any requirements file. A fresh venv (as on the M2/M3
+rebuild) had no path to it at all, and the only symptom was every code-graph
+hook silently warning "Graphify executable not found." `graphifyy` is now a
+DECLARED dependency: `mcp/graph_requirements.txt`, installed by both
+installers **by default** (opt out with `--no-graph` / `-NoGraph` if you only
+need task cards) — unlike `--with-db` / `--with-memory`, which stay opt-in.
+See that file for the current pinned version, footprint, and license notes.
 
 ---
 
