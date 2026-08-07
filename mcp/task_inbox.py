@@ -293,14 +293,21 @@ def _run_loop(
     source_repository_id: str,
     interval: float,
     apply_fn: ApplyFn,
+    stop_event: Optional[threading.Event] = None,
 ) -> None:
     """Poll every ``interval`` seconds until SIGINT/SIGTERM. Never raises: a
     transient network/HTTP/apply error (anything ``poll_once`` propagates) is
     logged and the loop continues — only a shutdown signal ends it, mirroring
     drain's "cursor held, keep retrying" resilience for the down-path.
+
+    ``stop_event`` is injectable: when None (the CLI default) the loop owns the
+    event and wires SIGINT/SIGTERM to it; when provided, the caller sets it to
+    stop the loop — so interruptibility is testable cross-platform without OS
+    signal delivery (``os.kill(pid, SIGINT)`` hard-kills the process on Windows).
     """
-    stop_event = threading.Event()
-    _install_shutdown_handler(stop_event)
+    if stop_event is None:
+        stop_event = threading.Event()
+        _install_shutdown_handler(stop_event)
     _log(
         f"starting down-sync loop (interval={interval}s, "
         f"source_repository_id={source_repository_id!r}, repo_root={repo_root})"

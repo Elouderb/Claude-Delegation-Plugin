@@ -234,41 +234,66 @@ class TestLoopMode(TaskInboxCliTestCase):
         signal.signal(signal.SIGTERM, self._orig_sigterm)
         super().tearDown()
 
-    def test_loop_is_promptly_interruptible_by_sigint(self):
+    def test_loop_is_promptly_interruptible(self):
+        # Cross-platform: inject a stop_event and set it from a timer thread
+        # instead of delivering an OS signal. os.kill(pid, SIGINT) doesn't invoke
+        # the handler on Windows — it TerminateProcess-es the interpreter (exit 2).
+        # This still exercises the real property: the between-poll wait is a
+        # wait()-on-Event, not a blind time.sleep(interval).
         client = _FakeClient("http://api.example.invalid", "k")
         client._script = []  # every poll returns an empty page
+        stop_event = threading.Event()
 
-        def _send_sigint_soon():
+        def _stop_soon():
             time.sleep(0.2)
-            os.kill(os.getpid(), signal.SIGINT)
+            stop_event.set()
 
-        sender = threading.Thread(target=_send_sigint_soon, daemon=True)
-        sender.start()
+        stopper = threading.Thread(target=_stop_soon, daemon=True)
+        stopper.start()
         start = time.monotonic()
         task_inbox._run_loop(
-            client, self.repo, "src", interval=10.0, apply_fn=lambda t: {"title": "x"}
+            client, self.repo, "src", interval=10.0,
+            apply_fn=lambda t: {"title": "x"}, stop_event=stop_event,
         )
         elapsed = time.monotonic() - start
-        sender.join(timeout=2)
-        # Interrupted well before the 10s interval elapsed — proves the sleep
-        # is a wait()-on-Event, not a blind time.sleep(interval).
+        stopper.join(timeout=2)
         self.assertLess(elapsed, 5.0)
+
+    def test_shutdown_handler_sets_event_when_invoked(self):
+        # The SIGINT/SIGTERM -> stop_event wiring, verified by invoking the
+        # installed handler directly (cross-platform; no OS signal delivery).
+        # Save/restore the process-wide handlers so pytest's Ctrl+C is untouched.
+        ev = threading.Event()
+        prev_int = signal.getsignal(signal.SIGINT)
+        prev_term = signal.getsignal(signal.SIGTERM)
+        try:
+            task_inbox._install_shutdown_handler(ev)
+            handler = signal.getsignal(signal.SIGINT)
+            assert callable(handler)  # checks + narrows the union for the call below
+            handler(signal.SIGINT, None)  # invoke directly
+            self.assertTrue(ev.is_set())
+        finally:
+            signal.signal(signal.SIGINT, prev_int)
+            signal.signal(signal.SIGTERM, prev_term)
 
     def test_loop_survives_a_transient_poll_error(self):
         client = _FakeClient("http://api.example.invalid", "k")
         client._script = [ApiError("transient", status=503)]  # first poll fails
 
-        def _send_sigint_soon():
-            time.sleep(0.3)
-            os.kill(os.getpid(), signal.SIGINT)
+        stop_event = threading.Event()
 
-        sender = threading.Thread(target=_send_sigint_soon, daemon=True)
-        sender.start()
+        def _stop_soon():
+            time.sleep(0.3)
+            stop_event.set()
+
+        stopper = threading.Thread(target=_stop_soon, daemon=True)
+        stopper.start()
         # Must return normally (no exception) despite the first poll raising.
         task_inbox._run_loop(
-            client, self.repo, "src", interval=0.05, apply_fn=lambda t: {"title": "x"}
+            client, self.repo, "src", interval=0.05,
+            apply_fn=lambda t: {"title": "x"}, stop_event=stop_event,
         )
-        sender.join(timeout=2)
+        stopper.join(timeout=2)
         # More than one poll happened: the transient error did not kill the loop.
         self.assertGreaterEqual(len(client.get_tasks_calls), 2)
 
