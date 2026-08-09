@@ -11,6 +11,8 @@ package for identity handling. See the package docstring
 from __future__ import annotations
 
 import json
+import os
+import ssl
 import urllib.error
 import urllib.parse
 import urllib.request
@@ -31,9 +33,36 @@ class ApiError(Exception):
         self.code = code
 
 
+def _build_ssl_context(
+    base_url: str, ca_bundle: Optional[str]
+) -> Optional[ssl.SSLContext]:
+    """Build a certificate-verifying TLS context for an ``https`` base URL.
+
+    Returns ``None`` for a plain ``http`` URL, so the HTTP path is byte-for-byte
+    unchanged (no ``context`` is ever passed to ``urlopen`` — the current
+    trusted-LAN default until the TLS cutover). For ``https``:
+
+    * ``ca_bundle`` set   → verify the hub's cert against that PEM CA bundle
+      (``ssl.create_default_context(cafile=ca_bundle)``) — the hub sitting behind
+      an internal-CA reverse proxy (Caddy ``tls internal``);
+    * ``ca_bundle`` unset → the system trust store
+      (``ssl.create_default_context()``), for a publicly-trusted cert.
+
+    There is deliberately NO skip-verify / insecure mode — the chosen model is
+    CA verification. Built ONCE at :class:`Client` construction and reused for
+    every request (a context per request is expensive).
+    """
+    if urllib.parse.urlsplit(base_url).scheme != "https":
+        return None
+    if ca_bundle:
+        return ssl.create_default_context(cafile=ca_bundle)
+    return ssl.create_default_context()
+
+
 def _request(
     method: str, url: str, api_key: Optional[str], *,
     payload: Optional[Dict[str, Any]] = None, timeout: float = 10.0,
+    ssl_context: Optional[ssl.SSLContext] = None,
 ) -> Dict[str, Any]:
     """Issue one HTTP request and return the parsed JSON body.
 
@@ -41,6 +70,10 @@ def _request(
     status (unlike ``outbox.drain.post_json``, which returns non-200 to its
     caller for cursor-discipline reasons this read-only client doesn't share —
     here a failure is always exceptional).
+
+    ``ssl_context`` (built once by :class:`Client`) is threaded to ``urlopen``
+    for an ``https`` URL; for ``http`` it is ``None`` and no ``context`` kwarg is
+    passed at all, keeping the plain-HTTP path unchanged.
     """
     body = json.dumps(payload).encode("utf-8") if payload is not None else None
     request = urllib.request.Request(url, data=body, method=method)
@@ -48,8 +81,11 @@ def _request(
         request.add_header("Content-Type", "application/json")
     if api_key:
         request.add_header("Authorization", f"Bearer {api_key}")
+    open_kwargs: Dict[str, Any] = {"timeout": timeout}
+    if ssl_context is not None:
+        open_kwargs["context"] = ssl_context
     try:
-        with urllib.request.urlopen(request, timeout=timeout) as response:
+        with urllib.request.urlopen(request, **open_kwargs) as response:
             status = int(getattr(response, "status", 0) or response.getcode())
             raw = response.read().decode("utf-8", errors="replace")
     except urllib.error.HTTPError as exc:  # a real response with an error status
@@ -81,10 +117,20 @@ class Client:
     """Thin client for the subset of the Agent OS ``/v1`` API this stand-in
     reads: machines, repositories, sessions, recent events, and sync cursors."""
 
-    def __init__(self, base_url: str, api_key: Optional[str] = None, *, timeout: float = 10.0):
+    def __init__(
+        self, base_url: str, api_key: Optional[str] = None, *,
+        timeout: float = 10.0, ca_bundle: Optional[str] = None,
+    ):
         self.base_url = base_url.rstrip("/")
         self.api_key = api_key
         self.timeout = timeout
+        # Resolve the TLS trust anchor ONCE. An https base URL verifies the hub's
+        # cert against AGENT_OS_API_CA_BUNDLE (the internal root CA distributed to
+        # clients) when set, else the system trust store; an http URL builds no
+        # context and leaves the transport unchanged. See _build_ssl_context.
+        if ca_bundle is None:
+            ca_bundle = os.environ.get("AGENT_OS_API_CA_BUNDLE")
+        self._ssl_context = _build_ssl_context(self.base_url, ca_bundle)
 
     def _url(self, path: str, params: Optional[Dict[str, Any]] = None) -> str:
         url = f"{self.base_url}{path}"
@@ -95,18 +141,21 @@ class Client:
         return url
 
     def get_machines(self) -> List[Dict[str, Any]]:
-        body = _request("GET", self._url("/v1/machines"), self.api_key, timeout=self.timeout)
+        body = _request(
+            "GET", self._url("/v1/machines"), self.api_key,
+            timeout=self.timeout, ssl_context=self._ssl_context,
+        )
         return body.get("machines") or []
 
     def get_repositories(self, machine_id: Optional[str] = None) -> List[Dict[str, Any]]:
         url = self._url("/v1/repositories", {"machine_id": machine_id})
-        body = _request("GET", url, self.api_key, timeout=self.timeout)
+        body = _request("GET", url, self.api_key, timeout=self.timeout, ssl_context=self._ssl_context)
         return body.get("repositories") or []
 
     def get_sessions(self, active: bool = False) -> List[Dict[str, Any]]:
         params = {"active": "1"} if active else None
         url = self._url("/v1/sessions", params)
-        body = _request("GET", url, self.api_key, timeout=self.timeout)
+        body = _request("GET", url, self.api_key, timeout=self.timeout, ssl_context=self._ssl_context)
         return body.get("sessions") or []
 
     def get_recent_events(
@@ -120,7 +169,7 @@ class Client:
             "event_type": event_type, "after_seq": after_seq,
         }
         url = self._url("/v1/events/recent", params)
-        return _request("GET", url, self.api_key, timeout=self.timeout)
+        return _request("GET", url, self.api_key, timeout=self.timeout, ssl_context=self._ssl_context)
 
     def get_tasks(
         self, *, repository_id: Optional[str] = None, since: Optional[int] = None,
@@ -130,18 +179,21 @@ class Client:
         DOWN-projection poller keyset-walks by ``next_since``."""
         params = {"repository_id": repository_id, "since": since, "limit": limit}
         url = self._url("/v1/tasks", params)
-        return _request("GET", url, self.api_key, timeout=self.timeout)
+        return _request("GET", url, self.api_key, timeout=self.timeout, ssl_context=self._ssl_context)
 
     def get_sync_cursor(self, client_id: str) -> Dict[str, Any]:
         url = self._url(f"/v1/sync/{urllib.parse.quote(client_id, safe='')}")
-        return _request("GET", url, self.api_key, timeout=self.timeout)
+        return _request("GET", url, self.api_key, timeout=self.timeout, ssl_context=self._ssl_context)
 
     def put_sync_cursor(
         self, client_id: str, *, last_seq: Optional[int], last_event_id: Optional[str],
     ) -> Dict[str, Any]:
         url = self._url(f"/v1/sync/{urllib.parse.quote(client_id, safe='')}")
         payload = {"last_seq": last_seq, "last_event_id": last_event_id}
-        return _request("PUT", url, self.api_key, payload=payload, timeout=self.timeout)
+        return _request(
+            "PUT", url, self.api_key, payload=payload,
+            timeout=self.timeout, ssl_context=self._ssl_context,
+        )
 
     # -- per-machine credential management (admin key required) ------------- #
     def issue_credential(
@@ -153,7 +205,10 @@ class Client:
             f"/v1/machines/{urllib.parse.quote(machine_id, safe='')}/credentials"
         )
         payload = {"label": label} if label is not None else {}
-        return _request("POST", url, self.api_key, payload=payload, timeout=self.timeout)
+        return _request(
+            "POST", url, self.api_key, payload=payload,
+            timeout=self.timeout, ssl_context=self._ssl_context,
+        )
 
     def revoke_credential(self, machine_id: str, key_id: str) -> Dict[str, Any]:
         """Revoke a per-machine key by ``key_id`` (admin-only; idempotent)."""
@@ -161,14 +216,17 @@ class Client:
             f"/v1/machines/{urllib.parse.quote(machine_id, safe='')}"
             f"/credentials/{urllib.parse.quote(key_id, safe='')}/revoke"
         )
-        return _request("POST", url, self.api_key, payload={}, timeout=self.timeout)
+        return _request(
+            "POST", url, self.api_key, payload={},
+            timeout=self.timeout, ssl_context=self._ssl_context,
+        )
 
     def list_credentials(self, machine_id: str) -> List[Dict[str, Any]]:
         """List a machine's credentials (admin-only) — ids + status, never secrets."""
         url = self._url(
             f"/v1/machines/{urllib.parse.quote(machine_id, safe='')}/credentials"
         )
-        body = _request("GET", url, self.api_key, timeout=self.timeout)
+        body = _request("GET", url, self.api_key, timeout=self.timeout, ssl_context=self._ssl_context)
         return body.get("credentials") or []
 
 

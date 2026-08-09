@@ -22,6 +22,7 @@ from __future__ import annotations
 import io
 import json
 import logging
+import os
 import socket
 import sys
 import threading
@@ -490,6 +491,101 @@ class TestCli(unittest.TestCase):
             cursor = client.get_sync_cursor("test-follow-client")
             self.assertIsNotNone(cursor["last_seq"])
             self.assertEqual(cursor["last_event_id"], "evt_during_follow")
+
+
+# --------------------------------------------------------------------------- #
+# TLS (Slice B, client half): SSLContext build + threading, hermetic
+# --------------------------------------------------------------------------- #
+class TestTlsContext(unittest.TestCase):
+    """Card 8737706e Slice B (TLS client half). The verifying SSLContext is built
+    ONCE from the base URL + ``AGENT_OS_API_CA_BUNDLE`` and threaded to
+    ``urlopen`` for an ``https`` URL only — proven with NO real TLS handshake or
+    socket: ``ssl.create_default_context`` and ``urllib.request.urlopen`` are
+    both patched. This is the client half only (the M3 Caddy proxy is the
+    separate deploy half)."""
+
+    @staticmethod
+    def _fake_urlopen(status=200, body=b"{}"):
+        """A urlopen return value usable as ``with urlopen(...) as response``."""
+        resp = mock.MagicMock()
+        resp.read.return_value = body
+        resp.status = status
+        resp.getcode.return_value = status
+        cm = mock.MagicMock()
+        cm.__enter__.return_value = resp
+        cm.__exit__.return_value = False
+        return cm
+
+    def test_http_url_passes_no_ssl_context(self):
+        # http builds NO context (even if a bundle is set) — the transport is
+        # byte-for-byte unchanged and urlopen gets no `context`.
+        with mock.patch.dict(
+            os.environ, {"AGENT_OS_API_CA_BUNDLE": "/should/be/ignored.pem"}, clear=False
+        ), mock.patch("services.m3_client.http.ssl.create_default_context") as mk_ctx, \
+                mock.patch("services.m3_client.http.urllib.request.urlopen") as mk_open:
+            mk_open.return_value = self._fake_urlopen()
+            client = Client("http://hub.example:8765", "k")
+            self.assertIsNone(client._ssl_context)
+            client.get_machines()
+            mk_ctx.assert_not_called()
+            self.assertIsNone(mk_open.call_args.kwargs.get("context"))
+
+    def test_https_with_ca_bundle_verifies_against_it(self):
+        sentinel = object()
+        with mock.patch.dict(
+            os.environ, {"AGENT_OS_API_CA_BUNDLE": "/etc/ca/hub-root.pem"}, clear=False
+        ), mock.patch(
+            "services.m3_client.http.ssl.create_default_context", return_value=sentinel
+        ) as mk_ctx, mock.patch(
+            "services.m3_client.http.urllib.request.urlopen"
+        ) as mk_open:
+            mk_open.return_value = self._fake_urlopen()
+            client = Client("https://hub.example:8443", "k")
+            mk_ctx.assert_called_once_with(cafile="/etc/ca/hub-root.pem")
+            self.assertIs(client._ssl_context, sentinel)
+            client.get_machines()
+            self.assertIs(mk_open.call_args.kwargs.get("context"), sentinel)
+
+    def test_https_without_ca_bundle_uses_system_trust(self):
+        sentinel = object()
+        with mock.patch.dict(os.environ, {}, clear=False), mock.patch(
+            "services.m3_client.http.ssl.create_default_context", return_value=sentinel
+        ) as mk_ctx, mock.patch(
+            "services.m3_client.http.urllib.request.urlopen"
+        ) as mk_open:
+            os.environ.pop("AGENT_OS_API_CA_BUNDLE", None)
+            mk_open.return_value = self._fake_urlopen()
+            client = Client("https://hub.example:8443", "k")
+            mk_ctx.assert_called_once_with()  # no cafile -> system trust store
+            self.assertIs(client._ssl_context, sentinel)
+            client.get_machines()
+            self.assertIs(mk_open.call_args.kwargs.get("context"), sentinel)
+
+    def test_context_built_once_not_per_request(self):
+        sentinel = object()
+        with mock.patch.dict(
+            os.environ, {"AGENT_OS_API_CA_BUNDLE": "/etc/ca/hub-root.pem"}, clear=False
+        ), mock.patch(
+            "services.m3_client.http.ssl.create_default_context", return_value=sentinel
+        ) as mk_ctx, mock.patch(
+            "services.m3_client.http.urllib.request.urlopen"
+        ) as mk_open:
+            mk_open.return_value = self._fake_urlopen()
+            client = Client("https://hub.example:8443", "k")
+            client.get_machines()
+            client.get_sessions()
+            client.get_repositories()
+            self.assertEqual(mk_ctx.call_count, 1)  # built at __init__, not per request
+            self.assertEqual(mk_open.call_count, 3)
+            for call in mk_open.call_args_list:
+                self.assertIs(call.kwargs.get("context"), sentinel)
+
+    def test_explicit_ca_bundle_arg_overrides_env(self):
+        with mock.patch.dict(
+            os.environ, {"AGENT_OS_API_CA_BUNDLE": "/env/ca.pem"}, clear=False
+        ), mock.patch("services.m3_client.http.ssl.create_default_context") as mk_ctx:
+            Client("https://hub.example:8443", "k", ca_bundle="/explicit/ca.pem")
+            mk_ctx.assert_called_once_with(cafile="/explicit/ca.pem")
 
 
 if __name__ == "__main__":
