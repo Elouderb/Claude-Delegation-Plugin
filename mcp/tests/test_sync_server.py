@@ -62,6 +62,7 @@ class TestChildEnv(unittest.TestCase):
         with mock.patch.dict(os.environ, {
             "AGENT_OS_API_URL": "http://127.0.0.1:8765",
             "AGENT_OS_API_KEY": "secret",
+            "AGENT_OS_API_CA_BUNDLE": "/etc/agent-os/ca.pem",
             "AGENT_OS_CENTRAL_DB_CONNECTION_STRING": "DRIVER=...;PWD=hunter2;",
             "DB_CONNECTION_STRING": "DRIVER=...;PWD=hunter2;",
         }, clear=False):
@@ -69,6 +70,8 @@ class TestChildEnv(unittest.TestCase):
         self.assertIn(str(sync_server._PLUGIN_ROOT), env["PYTHONPATH"].split(os.pathsep))
         self.assertEqual(env.get("AGENT_OS_API_URL"), "http://127.0.0.1:8765")
         self.assertEqual(env.get("AGENT_OS_API_KEY"), "secret")
+        # The CA bundle path must forward so the drain child can verify TLS.
+        self.assertEqual(env.get("AGENT_OS_API_CA_BUNDLE"), "/etc/agent-os/ca.pem")
         # The DB connection strings are NEVER forwarded to the drain child.
         self.assertNotIn("AGENT_OS_CENTRAL_DB_CONNECTION_STRING", env)
         self.assertNotIn("DB_CONNECTION_STRING", env)

@@ -114,10 +114,23 @@ machine, update that machine's `AGENT_OS_API_KEY`, then revoke the old `key_id` 
 the two overlap so there is no downtime. A lost secret is unrecoverable (only its
 hash is stored): revoke the `key_id` and issue a new one.
 
-> **Not yet: transport encryption (TLS).** This slice is the auth layer only. The
-> API still speaks plain HTTP; a per-machine `key_id.secret` on the wire is only as
-> private as the link. TLS termination (the M3 reverse proxy) is the separate
-> Slice B — do not treat the LAN traffic as encrypted until it lands.
+> **TLS (Slice B) — client half ready, proxy deploy pending.** Slice A was the
+> auth layer only. Slice B adds transport encryption via a TLS-terminating reverse
+> proxy on the M3 hub (Caddy `tls internal`, an internal CA). The **client half is
+> now in the code**: when `AGENT_OS_API_URL` is an `https://` URL (e.g.
+> `https://10.42.0.68:8443`, the Caddy proxy port), every bearer client — the
+> outbox drain (`outbox/drain.py`), the `m3_client` reader, the task-inbox and
+> key-management CLIs — verifies the hub's certificate. Set
+> **`AGENT_OS_API_CA_BUNDLE`** to a PEM file holding the hub's internal root CA
+> and the cert is verified against it; leave it unset to use the system trust
+> store (a publicly-trusted cert). There is **no skip-verify / insecure mode** —
+> the model is CA verification. The `SSLContext` is built once per client and
+> reused. An `http://` URL builds no context and is byte-for-byte unchanged, so
+> the trusted-LAN default keeps working until cutover. The remaining **deploy
+> half** — standing up the Caddy proxy on M3, minting the internal CA, rebinding
+> the API to loopback behind it, and distributing the CA PEM to clients — is not
+> done here; until it lands the API still speaks plain HTTP and a bearer token on
+> the wire is only as private as the link.
 
 **Errors.** Every error path returns a uniform envelope
 `{"error": {"code": "<machine_readable>", "message": "<human, sanitized>"}}` — no
@@ -227,8 +240,10 @@ from the security review, comment 145 — revisit each before the LAN bind):
    `MAX_CONTENT_LENGTH` 40 MiB), so a bug or leaked key can't submit an unbounded
    single-transaction batch.
 5. **Drain child env is allowlisted** (`mcp/sync_server.py`): the spawned drain
-   inherits only `AGENT_OS_API_URL`/`_KEY`/`_SYNC_*`/`_HOME`/`_EVENTS_*` plus
-   `PATH`/`HOME`/`PYTHON*` — the DB connection strings it never uses are withheld.
+   inherits only `AGENT_OS_API_URL`/`_KEY`/`_CA_BUNDLE`/`_SYNC_*`/`_HOME`/`_EVENTS_*`
+   plus `PATH`/`HOME`/`PYTHON*` — the DB connection strings it never uses are
+   withheld. (`AGENT_OS_API_CA_BUNDLE` is forwarded so the child can verify the
+   hub's TLS cert once the M3 proxy is deployed — see the TLS note above.)
 
 ## `ops.sync_cursors` (decision: implemented, card `93baf05b`)
 

@@ -20,12 +20,14 @@ import json
 import logging
 import os
 import socket
+import ssl
 import sys
 import threading
 import unittest
 from contextlib import contextmanager
 from pathlib import Path
 from tempfile import TemporaryDirectory
+from unittest import mock
 
 _REPO_ROOT = Path(__file__).resolve().parents[2]
 if str(_REPO_ROOT) not in sys.path:
@@ -410,6 +412,115 @@ class TestPostJson(unittest.TestCase):
                                               {"events": []}, timeout=3)
         self.assertEqual(status, 500)
         self.assertEqual(body.get("error"), "boom")
+
+
+# --------------------------------------------------------------------------- #
+# TLS (Slice B, client half): SSLContext build + threading, hermetic
+# --------------------------------------------------------------------------- #
+class TestTlsContext(unittest.TestCase):
+    """Card 8737706e Slice B (TLS client half) for the drain transport. The
+    verifying SSLContext is built ONCE from ``api_url`` + ``AGENT_OS_API_CA_BUNDLE``
+    and threaded to ``urlopen`` for an ``https`` URL only — proven with NO real
+    handshake or socket (``ssl.create_default_context`` and
+    ``urllib.request.urlopen`` are both patched). This is the client half only
+    (the M3 Caddy proxy is the separate deploy half)."""
+
+    @staticmethod
+    def _fake_urlopen(status=200, body=b"{}"):
+        """A urlopen return value usable as ``with urlopen(...) as response``."""
+        resp = mock.MagicMock()
+        resp.read.return_value = body
+        resp.status = status
+        resp.getcode.return_value = status
+        cm = mock.MagicMock()
+        cm.__enter__.return_value = resp
+        cm.__exit__.return_value = False
+        return cm
+
+    # -- _build_ssl_context ------------------------------------------------- #
+    def test_build_context_http_is_none(self):
+        with mock.patch("outbox.drain.ssl.create_default_context") as mk_ctx:
+            self.assertIsNone(
+                ob_drain._build_ssl_context("http://127.0.0.1:8765", "/ca.pem")
+            )
+            mk_ctx.assert_not_called()  # no context for http, even with a bundle
+
+    def test_build_context_https_with_bundle(self):
+        sentinel = object()
+        with mock.patch(
+            "outbox.drain.ssl.create_default_context", return_value=sentinel
+        ) as mk_ctx:
+            ctx = ob_drain._build_ssl_context("https://hub:8443", "/etc/ca/root.pem")
+            mk_ctx.assert_called_once_with(cafile="/etc/ca/root.pem")
+            self.assertIs(ctx, sentinel)
+
+    def test_build_context_https_without_bundle(self):
+        sentinel = object()
+        with mock.patch(
+            "outbox.drain.ssl.create_default_context", return_value=sentinel
+        ) as mk_ctx:
+            ctx = ob_drain._build_ssl_context("https://hub:8443", None)
+            mk_ctx.assert_called_once_with()  # no cafile -> system trust store
+            self.assertIs(ctx, sentinel)
+
+    # -- config_from_env ---------------------------------------------------- #
+    def test_config_from_env_reads_ca_bundle(self):
+        with mock.patch.dict(
+            os.environ, {"AGENT_OS_API_CA_BUNDLE": "/env/ca.pem"}, clear=False
+        ):
+            cfg = ob_drain.config_from_env(repo_root=Path("."))
+            self.assertEqual(cfg.ca_bundle, "/env/ca.pem")
+
+    def test_config_from_env_ca_bundle_absent_is_none(self):
+        with mock.patch.dict(os.environ, {}, clear=False):
+            os.environ.pop("AGENT_OS_API_CA_BUNDLE", None)
+            cfg = ob_drain.config_from_env(repo_root=Path("."))
+            self.assertIsNone(cfg.ca_bundle)
+
+    # -- post_json threads the context ------------------------------------- #
+    def test_post_json_https_passes_context(self):
+        # A real (but locally-built) SSLContext — no network — proves post_json
+        # forwards exactly the context it is handed to urlopen for an https URL.
+        ctx = ssl.create_default_context()
+        with mock.patch("outbox.drain.urllib.request.urlopen") as mk_open:
+            mk_open.return_value = self._fake_urlopen()
+            ob_drain.post_json(
+                "https://hub:8443/v1/events/batch", "k", {"events": []}, 3,
+                ssl_context=ctx,
+            )
+            self.assertIs(mk_open.call_args.kwargs.get("context"), ctx)
+
+    def test_post_json_http_passes_no_context(self):
+        with mock.patch("outbox.drain.urllib.request.urlopen") as mk_open:
+            mk_open.return_value = self._fake_urlopen()
+            ob_drain.post_json(
+                "http://127.0.0.1:8765/v1/events/batch", "k", {"events": []}, 3
+            )
+            self.assertIsNone(mk_open.call_args.kwargs.get("context"))
+
+    # -- Drainer builds the context once ----------------------------------- #
+    def test_drainer_builds_context_once_for_https(self):
+        sentinel = object()
+        cfg = ob_drain.DrainConfig(
+            api_url="https://hub:8443", api_key="k", repo_root=Path("."),
+            ca_bundle="/etc/ca/root.pem",
+        )
+        with mock.patch(
+            "outbox.drain.ssl.create_default_context", return_value=sentinel
+        ) as mk_ctx:
+            drainer = ob_drain.Drainer(cfg)
+            self.assertIs(drainer._ssl_context, sentinel)
+            mk_ctx.assert_called_once_with(cafile="/etc/ca/root.pem")  # once, at init
+
+    def test_drainer_http_builds_no_context(self):
+        cfg = ob_drain.DrainConfig(
+            api_url="http://127.0.0.1:8765", api_key="k", repo_root=Path("."),
+            ca_bundle="/etc/ca/root.pem",  # ignored for http
+        )
+        with mock.patch("outbox.drain.ssl.create_default_context") as mk_ctx:
+            drainer = ob_drain.Drainer(cfg)
+            self.assertIsNone(drainer._ssl_context)
+            mk_ctx.assert_not_called()
 
 
 if __name__ == "__main__":

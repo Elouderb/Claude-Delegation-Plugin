@@ -40,6 +40,9 @@ Config (all from the environment):
 
 * ``AGENT_OS_API_URL`` (default ``http://127.0.0.1:8765``)
 * ``AGENT_OS_API_KEY`` (bearer key; sent as ``Authorization: Bearer ...``)
+* ``AGENT_OS_API_CA_BUNDLE`` path to a PEM of the hub's internal root CA — when
+  ``AGENT_OS_API_URL`` is ``https``, the server cert is verified against it;
+  unset falls back to the system trust store. Ignored for ``http`` (no TLS).
 * ``AGENT_OS_SYNC_INTERVAL`` seconds between idle polls (default 30)
 * ``AGENT_OS_SYNC_BATCH`` max events per batch (default 500)
 * ``AGENT_OS_SYNC_TIMEOUT`` per-request timeout seconds (default 10)
@@ -52,9 +55,11 @@ import argparse
 import json
 import os
 import random
+import ssl
 import sys
 import time
 import urllib.error
+import urllib.parse
 import urllib.request
 from dataclasses import dataclass
 from datetime import datetime, timezone
@@ -70,6 +75,7 @@ from . import _fsutil, paths, store
 _DISABLED_ENV = "AGENT_OS_SYNC_DISABLED"
 _URL_ENV = "AGENT_OS_API_URL"
 _KEY_ENV = "AGENT_OS_API_KEY"
+_CA_BUNDLE_ENV = "AGENT_OS_API_CA_BUNDLE"
 _INTERVAL_ENV = "AGENT_OS_SYNC_INTERVAL"
 _BATCH_ENV = "AGENT_OS_SYNC_BATCH"
 _TIMEOUT_ENV = "AGENT_OS_SYNC_TIMEOUT"
@@ -98,6 +104,7 @@ class DrainConfig:
     api_url: str
     api_key: Optional[str]
     repo_root: Path
+    ca_bundle: Optional[str] = None
     interval: float = _DEFAULT_INTERVAL
     batch_size: int = _DEFAULT_BATCH
     timeout: float = _DEFAULT_TIMEOUT
@@ -131,6 +138,7 @@ def config_from_env(repo_root: Optional[Path] = None) -> DrainConfig:
     return DrainConfig(
         api_url=os.environ.get(_URL_ENV) or _DEFAULT_URL,
         api_key=os.environ.get(_KEY_ENV),
+        ca_bundle=os.environ.get(_CA_BUNDLE_ENV),
         repo_root=Path(repo_root) if repo_root is not None else paths.find_repo_root(),
         interval=_env_float(_INTERVAL_ENV, _DEFAULT_INTERVAL),
         batch_size=_env_int(_BATCH_ENV, _DEFAULT_BATCH),
@@ -149,8 +157,35 @@ def _log(message: str) -> None:
         pass
 
 
+def _build_ssl_context(
+    api_url: str, ca_bundle: Optional[str]
+) -> Optional[ssl.SSLContext]:
+    """Build a certificate-verifying TLS context for an ``https`` API URL.
+
+    Returns ``None`` for a plain ``http`` URL, so the HTTP path is byte-for-byte
+    unchanged (no ``context`` is ever passed to ``urlopen`` — the current
+    trusted-LAN default until the TLS cutover). For ``https``:
+
+    * ``ca_bundle`` set   → verify the hub's cert against that PEM CA bundle
+      (``ssl.create_default_context(cafile=ca_bundle)``) — the hub behind an
+      internal-CA reverse proxy (Caddy ``tls internal``);
+    * ``ca_bundle`` unset → the system trust store
+      (``ssl.create_default_context()``), for a publicly-trusted cert.
+
+    There is deliberately NO skip-verify / insecure mode. Built ONCE at
+    :class:`Drainer` construction and reused for every request (a context per
+    request is expensive).
+    """
+    if urllib.parse.urlsplit(api_url).scheme != "https":
+        return None
+    if ca_bundle:
+        return ssl.create_default_context(cafile=ca_bundle)
+    return ssl.create_default_context()
+
+
 def post_json(
-    url: str, api_key: Optional[str], payload: Dict[str, Any], timeout: float
+    url: str, api_key: Optional[str], payload: Dict[str, Any], timeout: float,
+    *, ssl_context: Optional[ssl.SSLContext] = None,
 ) -> Tuple[int, Dict[str, Any]]:
     """POST ``payload`` as JSON; return ``(status, parsed_body)``.
 
@@ -158,14 +193,21 @@ def post_json(
     timeout). An HTTP error *response* (4xx/5xx) is returned as ``(status, body)``
     — NOT raised — so the caller applies uniform "non-200 ⇒ do not advance" logic.
     urllib only; Windows-safe.
+
+    ``ssl_context`` (built once by :class:`Drainer`) is threaded to ``urlopen``
+    for an ``https`` URL; for ``http`` it is ``None`` and no ``context`` kwarg is
+    passed at all, keeping the plain-HTTP path unchanged.
     """
     body = json.dumps(payload).encode("utf-8")
     request = urllib.request.Request(url, data=body, method="POST")
     request.add_header("Content-Type", "application/json")
     if api_key:
         request.add_header("Authorization", f"Bearer {api_key}")
+    open_kwargs: Dict[str, Any] = {"timeout": timeout}
+    if ssl_context is not None:
+        open_kwargs["context"] = ssl_context
     try:
-        with urllib.request.urlopen(request, timeout=timeout) as response:
+        with urllib.request.urlopen(request, **open_kwargs) as response:
             status = int(getattr(response, "status", 0) or response.getcode())
             raw = response.read().decode("utf-8", errors="replace")
     except urllib.error.HTTPError as exc:  # 4xx/5xx: a real response with a body
@@ -191,6 +233,10 @@ class Drainer:
     def __init__(self, config: DrainConfig):
         self.config = config
         self.repo_root = Path(config.repo_root)
+        # Resolve the TLS trust anchor ONCE (an https api_url verifies the hub's
+        # cert against config.ca_bundle when set, else the system trust store; an
+        # http url builds no context). Reused for every post_json below.
+        self._ssl_context = _build_ssl_context(config.api_url, config.ca_bundle)
         self._registered = False
         self._local_repo_id: Optional[str] = None
         self._canonical_repo_id: Optional[str] = None
@@ -276,7 +322,7 @@ class Drainer:
 
         status, _ = post_json(
             self._url("/v1/machines/register"), self.config.api_key, self._machine,
-            self.config.timeout,
+            self.config.timeout, ssl_context=self._ssl_context,
         )
         if status != 200:
             _log(f"machine register returned HTTP {status}")
@@ -292,7 +338,7 @@ class Drainer:
         repo_payload["machine_id"] = self._machine["machine_id"]
         status, body = post_json(
             self._url("/v1/repositories/register"), self.config.api_key, repo_payload,
-            self.config.timeout,
+            self.config.timeout, ssl_context=self._ssl_context,
         )
         if status != 200:
             _log(f"repository register returned HTTP {status}")
@@ -302,7 +348,7 @@ class Drainer:
 
         status, _ = post_json(
             self._url("/v1/sessions/register"), self.config.api_key,
-            self._session_payload(), self.config.timeout,
+            self._session_payload(), self.config.timeout, ssl_context=self._ssl_context,
         )
         if status != 200:
             _log(f"session register returned HTTP {status}")
@@ -332,6 +378,7 @@ class Drainer:
             post_json(
                 self._url(f"/v1/sessions/{self._session_id}/heartbeat"),
                 self.config.api_key, {"status": "running"}, self.config.timeout,
+                ssl_context=self._ssl_context,
             )
         except TransportError as exc:
             _log(f"heartbeat failed (ignored): {exc}")
@@ -371,7 +418,7 @@ class Drainer:
             payload = {"events": [self._outgoing_event(event.raw) for event in to_send]}
             status, body = post_json(
                 self._url("/v1/events/batch"), self.config.api_key, payload,
-                self.config.timeout,
+                self.config.timeout, ssl_context=self._ssl_context,
             )
             if status != 200:
                 raise TransportError(f"events/batch returned HTTP {status}")

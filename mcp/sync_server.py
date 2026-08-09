@@ -9,8 +9,8 @@ child output redirected to a log file, never a PIPE that could fill and block).
 so a stock install never phones home without explicit opt-in (proposal §5.5 /
 local-first). With it unset, :func:`start_sync_worker` returns immediately and no
 network process is ever created. The drain itself has its own kill-switch
-(``AGENT_OS_SYNC_DISABLED=1``) and reads ``AGENT_OS_API_URL`` / ``AGENT_OS_API_KEY``
-from an explicit env allowlist (see :func:`_child_env`).
+(``AGENT_OS_SYNC_DISABLED=1``) and reads ``AGENT_OS_API_URL`` / ``AGENT_OS_API_KEY`` /
+``AGENT_OS_API_CA_BUNDLE`` from an explicit env allowlist (see :func:`_child_env`).
 
 Import resolution (the load-bearing spawn detail)
 -------------------------------------------------
@@ -59,7 +59,7 @@ _PLUGIN_ROOT = Path(__file__).resolve().parent.parent
 # — the drain never touches the DB directly, so it should never see them (blast-
 # radius containment; security review comment 145 Low).
 _CHILD_ENV_ALLOW = (
-    "AGENT_OS_API_URL", "AGENT_OS_API_KEY",
+    "AGENT_OS_API_URL", "AGENT_OS_API_KEY", "AGENT_OS_API_CA_BUNDLE",
     "AGENT_OS_SYNC", "AGENT_OS_SYNC_INTERVAL", "AGENT_OS_SYNC_BATCH",
     "AGENT_OS_SYNC_TIMEOUT", "AGENT_OS_SYNC_DISABLED",
     "AGENT_OS_HOME", "AGENT_OS_EVENTS_FSYNC", "AGENT_OS_EVENTS_DISABLED",
