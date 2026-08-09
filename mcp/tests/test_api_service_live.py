@@ -186,6 +186,7 @@ class TestLiveApiService(unittest.TestCase):
             repository_id=repo_id, machine_id=machine_a, repo_root=root,
             canonical_remote=None, project_id=None, created_at=utc_now(),
         )
+        assert first is not None  # direct store call (owner_machine_id=None) never denies
         self.assertTrue(first["created"])
         # Same repository_id, different machine, different root (so the natural key
         # (machine_b, new_root) MISSES) -> forces the except-branch PK-refresh path.
@@ -193,6 +194,7 @@ class TestLiveApiService(unittest.TestCase):
             repository_id=repo_id, machine_id=machine_b, repo_root="/live/test/remint-machine-b",
             canonical_remote=None, project_id=None, created_at=utc_now(),
         )
+        assert again is not None
         self.assertEqual(again["repository_id"], repo_id)
         self.assertFalse(again["created"])
         repos = {r["repository_id"]: r for r in
