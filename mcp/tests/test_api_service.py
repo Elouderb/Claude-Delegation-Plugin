@@ -9,6 +9,7 @@ ops.ingest_errors recording + the 5xx transport path), and the read surface.
 
 from __future__ import annotations
 
+import hashlib
 import sys
 import unittest
 from pathlib import Path
@@ -51,6 +52,18 @@ def _event(machine_id, repository_id, *, event_id=None, event_type="task.created
         "task_id": "card1234",
         "payload": {"card_id": "card1234"},
     }
+
+
+def _issue_key(client, machine_id, label=None):
+    """Issue a per-machine key via the admin endpoint; return the Flask response."""
+    body = {"label": label} if label is not None else {}
+    return client.post(f"/v1/machines/{machine_id}/credentials", headers=_AUTH, json=body)
+
+
+def _register_machine(client, machine_id=None):
+    machine_id = machine_id or new_id(MACHINE)
+    client.post("/v1/machines/register", headers=_AUTH, json=_machine_payload(machine_id))
+    return machine_id
 
 
 class TestAuth(unittest.TestCase):
@@ -544,6 +557,287 @@ class TestSyncCursors(unittest.TestCase):
         client.put("/v1/sync/b", headers=_AUTH, json={"last_seq": 20, "last_event_id": None})
         self.assertEqual(client.get("/v1/sync/a", headers=_AUTH).get_json()["last_seq"], 10)
         self.assertEqual(client.get("/v1/sync/b", headers=_AUTH).get_json()["last_seq"], 20)
+
+
+class TestPerMachineKeys(unittest.TestCase):
+    """Per-machine credential auth (card 8737706e, Slice A)."""
+
+    def _register_and_issue(self, label=None):
+        client, store = _client()
+        machine_id = _register_machine(client)
+        r = _issue_key(client, machine_id, label=label)
+        self.assertEqual(r.status_code, 201, r.get_data(as_text=True))
+        return client, store, machine_id, r.get_json()
+
+    def test_valid_per_machine_key_authenticates(self):
+        client, _store, _mid, issued = self._register_and_issue()
+        auth = {"Authorization": f"Bearer {issued['key']}"}
+        self.assertEqual(client.get("/v1/machines", headers=auth).status_code, 200)
+
+    def test_revoked_key_is_401(self):
+        client, _store, machine_id, issued = self._register_and_issue()
+        key_id = issued["key_id"]
+        rv = client.post(
+            f"/v1/machines/{machine_id}/credentials/{key_id}/revoke", headers=_AUTH
+        )
+        self.assertEqual(rv.status_code, 200)
+        auth = {"Authorization": f"Bearer {issued['key']}"}
+        self.assertEqual(client.get("/v1/machines", headers=auth).status_code, 401)
+
+    def test_wrong_secret_is_401(self):
+        client, _store, _mid, issued = self._register_and_issue()
+        auth = {"Authorization": f"Bearer {issued['key_id']}.not-the-secret"}
+        self.assertEqual(client.get("/v1/machines", headers=auth).status_code, 401)
+
+    def test_unknown_key_id_is_401(self):
+        client, _ = _client()
+        auth = {"Authorization": "Bearer key_01J8Z3M4Q5R6S7T8V9W0X1Y2Z3.whatever"}
+        self.assertEqual(client.get("/v1/machines", headers=auth).status_code, 401)
+
+    def test_malformed_no_dot_falls_through_to_401(self):
+        # No '.' → phase-1 admin compare fails, phase-2 never engages → 401.
+        client, _ = _client()
+        auth = {"Authorization": "Bearer not-the-admin-key-and-no-dot"}
+        self.assertEqual(client.get("/v1/machines", headers=auth).status_code, 401)
+
+    def test_admin_key_still_works_unchanged(self):
+        # The shared key remains the full-authority admin/bootstrap key.
+        client, _ = _client()
+        self.assertEqual(client.get("/v1/machines", headers=_AUTH).status_code, 200)
+
+    def test_issuance_requires_admin(self):
+        client, _store, machine_id, issued = self._register_and_issue()
+        auth = {"Authorization": f"Bearer {issued['key']}"}
+        r = client.post(f"/v1/machines/{machine_id}/credentials", headers=auth, json={})
+        self.assertEqual(r.status_code, 403)
+        self.assertEqual(r.get_json()["error"]["code"], "forbidden")
+
+    def test_issue_for_unknown_machine_is_404(self):
+        client, _ = _client()
+        r = client.post(
+            f"/v1/machines/{new_id(MACHINE)}/credentials", headers=_AUTH, json={}
+        )
+        self.assertEqual(r.status_code, 404)
+
+    def test_secret_returned_once_and_only_hash_is_stored(self):
+        client, store, machine_id, issued = self._register_and_issue(label="drain")
+        key_id, secret = issued["key_id"], issued["secret"]
+        self.assertEqual(issued["key"], f"{key_id}.{secret}")
+        stored = store.credentials[key_id]["secret_hash"]
+        # The plaintext is NOT stored; only its SHA-256 hex digest is.
+        self.assertNotEqual(stored, secret)
+        self.assertEqual(stored, hashlib.sha256(secret.encode()).hexdigest())
+        # Listing exposes ids + status but NEVER the secret or its hash.
+        listed = client.get(
+            f"/v1/machines/{machine_id}/credentials", headers=_AUTH
+        ).get_json()["credentials"]
+        self.assertIn(key_id, [c["key_id"] for c in listed])
+        self.assertTrue(all("secret_hash" not in c and "secret" not in c for c in listed))
+
+    def test_revoke_is_idempotent(self):
+        client, _store, machine_id, issued = self._register_and_issue()
+        key_id = issued["key_id"]
+        first = client.post(
+            f"/v1/machines/{machine_id}/credentials/{key_id}/revoke", headers=_AUTH
+        )
+        second = client.post(
+            f"/v1/machines/{machine_id}/credentials/{key_id}/revoke", headers=_AUTH
+        )
+        self.assertEqual(first.status_code, 200)
+        self.assertEqual(second.status_code, 200)
+
+    def test_revoke_unknown_key_is_404(self):
+        client, store = _client()
+        machine_id = _register_machine(client)
+        r = client.post(
+            f"/v1/machines/{machine_id}/credentials/key_unknown/revoke", headers=_AUTH
+        )
+        self.assertEqual(r.status_code, 404)
+
+    def test_revoke_requires_admin(self):
+        # A per-machine key may NOT revoke credentials — admin-only (403).
+        client, _store, machine_id, issued = self._register_and_issue()
+        auth = {"Authorization": f"Bearer {issued['key']}"}
+        r = client.post(
+            f"/v1/machines/{machine_id}/credentials/{issued['key_id']}/revoke", headers=auth
+        )
+        self.assertEqual(r.status_code, 403)
+
+    def test_list_credentials_requires_admin(self):
+        # A per-machine key may NOT list credentials — admin-only (403).
+        client, _store, machine_id, issued = self._register_and_issue()
+        auth = {"Authorization": f"Bearer {issued['key']}"}
+        r = client.get(f"/v1/machines/{machine_id}/credentials", headers=auth)
+        self.assertEqual(r.status_code, 403)
+
+
+class TestMachineBinding(unittest.TestCase):
+    """A per-machine key may act only as its own machine; admin bypasses."""
+
+    def _setup(self):
+        client, store = _client()
+        own, other = _register_machine(client), _register_machine(client)
+        key = _issue_key(client, own).get_json()["key"]
+        return client, store, own, other, {"Authorization": f"Bearer {key}"}
+
+    def test_register_machine_binding(self):
+        client, _store, own, other, auth = self._setup()
+        self.assertEqual(
+            client.post("/v1/machines/register", headers=auth,
+                        json=_machine_payload(own)).status_code, 200
+        )
+        self.assertEqual(
+            client.post("/v1/machines/register", headers=auth,
+                        json=_machine_payload(other)).status_code, 403
+        )
+        # admin can register any machine
+        self.assertEqual(
+            client.post("/v1/machines/register", headers=_AUTH,
+                        json=_machine_payload(other)).status_code, 200
+        )
+
+    def test_register_repository_binding(self):
+        client, _store, own, other, auth = self._setup()
+        def _repo(machine_id):
+            return {
+                "repository_id": new_id(REPOSITORY), "machine_id": machine_id,
+                "repo_root": f"/home/{machine_id}/proj", "created_at": utc_now().isoformat(),
+            }
+        self.assertEqual(
+            client.post("/v1/repositories/register", headers=auth, json=_repo(own)).status_code, 200
+        )
+        self.assertEqual(
+            client.post("/v1/repositories/register", headers=auth, json=_repo(other)).status_code, 403
+        )
+
+    def test_register_session_binding(self):
+        client, _store, own, other, auth = self._setup()
+        def _sess(machine_id):
+            return {
+                "session_id": new_id(SESSION), "agent_id": new_id(AGENT),
+                "agent_type": "implementer", "machine_id": machine_id,
+                "status": "running", "started_at": utc_now().isoformat(),
+            }
+        self.assertEqual(
+            client.post("/v1/sessions/register", headers=auth, json=_sess(own)).status_code, 200
+        )
+        self.assertEqual(
+            client.post("/v1/sessions/register", headers=auth, json=_sess(other)).status_code, 403
+        )
+
+    def test_register_session_cannot_hijack_foreign_session(self):
+        # Claiming OWN machine_id (passes _require_machine_match) while targeting
+        # ANOTHER machine's existing session_id must be 403 — the store UPDATE keys
+        # only on session_id, so without the ownership guard this silently
+        # overwrote the victim (security review round 2, High #1).
+        client, store, own, other, auth = self._setup()
+        sess = new_id(SESSION)
+        client.post("/v1/sessions/register", headers=_AUTH, json={
+            "session_id": sess, "agent_id": new_id(AGENT), "agent_type": "implementer",
+            "machine_id": other, "status": "running", "started_at": utc_now().isoformat(),
+        })
+        hijack = client.post("/v1/sessions/register", headers=auth, json={
+            "session_id": sess, "agent_id": new_id(AGENT), "agent_type": "implementer",
+            "machine_id": own, "status": "running", "started_at": utc_now().isoformat(),
+        })
+        self.assertEqual(hijack.status_code, 403)
+        self.assertEqual(store.sessions[sess]["machine_id"], other)  # ownership intact
+        # Admin may re-register any session.
+        self.assertEqual(
+            client.post("/v1/sessions/register", headers=_AUTH, json={
+                "session_id": sess, "agent_id": new_id(AGENT), "agent_type": "implementer",
+                "machine_id": other, "status": "running", "started_at": utc_now().isoformat(),
+            }).status_code, 200
+        )
+
+    def test_register_repository_cannot_hijack_foreign_repo(self):
+        # Same class via upsert_repository's re-mint path (security review round 2,
+        # High #2): claim OWN machine_id + a fresh repo_root but target another
+        # machine's existing repository_id -> 403, ownership untouched.
+        client, store, own, other, auth = self._setup()
+        repo_id = new_id(REPOSITORY)
+        client.post("/v1/repositories/register", headers=_AUTH, json={
+            "repository_id": repo_id, "machine_id": other,
+            "repo_root": "/home/other/proj", "created_at": utc_now().isoformat(),
+        })
+        hijack = client.post("/v1/repositories/register", headers=auth, json={
+            "repository_id": repo_id, "machine_id": own,
+            "repo_root": "/home/own/evil", "created_at": utc_now().isoformat(),
+        })
+        self.assertEqual(hijack.status_code, 403)
+        self.assertEqual(store.repositories[repo_id]["machine_id"], other)  # ownership intact
+        self.assertEqual(store.repositories[repo_id]["repo_root"], "/home/other/proj")
+
+    def test_heartbeat_binding(self):
+        client, store, own, other, auth = self._setup()
+        # One session owned by each machine (both registered by admin).
+        own_sess, other_sess = new_id(SESSION), new_id(SESSION)
+        for sid, mid in ((own_sess, own), (other_sess, other)):
+            client.post("/v1/sessions/register", headers=_AUTH, json={
+                "session_id": sid, "agent_id": new_id(AGENT), "agent_type": "implementer",
+                "machine_id": mid, "status": "running", "started_at": utc_now().isoformat(),
+            })
+        # own's key may heartbeat its OWN session. Binding is enforced against the
+        # session's true owner now, so the body machine_id is irrelevant.
+        self.assertEqual(
+            client.post(f"/v1/sessions/{own_sess}/heartbeat", headers=auth,
+                        json={}).status_code, 200
+        )
+        # REGRESSION — the attack both reviewers reproduced: own's key targets
+        # OTHER's session while OMITTING machine_id. Real ownership check → 404
+        # (0 rows), no mutation, no existence leak — NOT the old 200.
+        self.assertEqual(
+            client.post(f"/v1/sessions/{other_sess}/heartbeat", headers=auth,
+                        json={"current_task_id": "hijacked"}).status_code, 404
+        )
+        # Spoofing the body machine_id (naming its OWN) also fails — body is ignored.
+        self.assertEqual(
+            client.post(f"/v1/sessions/{other_sess}/heartbeat", headers=auth,
+                        json={"machine_id": own, "current_task_id": "hijacked"}).status_code, 404
+        )
+        # The victim session was never mutated by either attempt.
+        self.assertEqual(store.sessions[other_sess]["status"], "running")
+        self.assertIsNone(store.sessions[other_sess].get("current_task_id"))
+        # Admin may heartbeat any session.
+        self.assertEqual(
+            client.post(f"/v1/sessions/{other_sess}/heartbeat", headers=_AUTH,
+                        json={}).status_code, 200
+        )
+
+    def test_events_binding_is_per_event_not_whole_batch(self):
+        client, store, own, other, auth = self._setup()
+        repo = new_id(REPOSITORY)
+        r = client.post("/v1/events/batch", headers=auth, json={"events": [
+            _event(own, repo),    # own machine → accepted
+            _event(other, repo),  # foreign machine → rejected (not a batch failure)
+        ]})
+        self.assertEqual(r.status_code, 200)
+        by_index = {o["index"]: o for o in r.get_json()["results"]}
+        self.assertEqual(by_index[0]["outcome"], "accepted")
+        self.assertEqual(by_index[1]["outcome"], "rejected")
+        # Only the own-machine event was ingested.
+        self.assertEqual(len(store.events), 1)
+        # Admin may submit an event for any machine.
+        r2 = client.post("/v1/events/batch", headers=_AUTH,
+                         json={"events": [_event(other, repo)]})
+        self.assertEqual(r2.get_json()["results"][0]["outcome"], "accepted")
+
+    def test_sync_cursor_is_admin_only(self):
+        # Stopgap (security review round 3, Medium): ops.sync_cursors has no
+        # per-machine ownership yet, so the endpoints are admin-only — a per-machine
+        # key is 403 on both read and write; the shared admin key (which every
+        # current sync consumer uses) still works. Proper first-writer-wins binding
+        # is a tracked follow-up.
+        client, _store, _own, _other, auth = self._setup()
+        cid = "consumer-x"
+        self.assertEqual(client.get(f"/v1/sync/{cid}", headers=auth).status_code, 403)
+        self.assertEqual(
+            client.put(f"/v1/sync/{cid}", headers=auth, json={"last_seq": 5}).status_code, 403
+        )
+        self.assertEqual(client.get(f"/v1/sync/{cid}", headers=_AUTH).status_code, 200)
+        self.assertEqual(
+            client.put(f"/v1/sync/{cid}", headers=_AUTH, json={"last_seq": 5}).status_code, 200
+        )
 
 
 if __name__ == "__main__":

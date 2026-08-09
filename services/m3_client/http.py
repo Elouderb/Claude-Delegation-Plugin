@@ -143,5 +143,33 @@ class Client:
         payload = {"last_seq": last_seq, "last_event_id": last_event_id}
         return _request("PUT", url, self.api_key, payload=payload, timeout=self.timeout)
 
+    # -- per-machine credential management (admin key required) ------------- #
+    def issue_credential(
+        self, machine_id: str, *, label: Optional[str] = None
+    ) -> Dict[str, Any]:
+        """Issue a per-machine key (admin-only). Returns ``{key_id, secret, key}`` —
+        the ``secret``/``key`` are shown ONCE and never retrievable again."""
+        url = self._url(
+            f"/v1/machines/{urllib.parse.quote(machine_id, safe='')}/credentials"
+        )
+        payload = {"label": label} if label is not None else {}
+        return _request("POST", url, self.api_key, payload=payload, timeout=self.timeout)
+
+    def revoke_credential(self, machine_id: str, key_id: str) -> Dict[str, Any]:
+        """Revoke a per-machine key by ``key_id`` (admin-only; idempotent)."""
+        url = self._url(
+            f"/v1/machines/{urllib.parse.quote(machine_id, safe='')}"
+            f"/credentials/{urllib.parse.quote(key_id, safe='')}/revoke"
+        )
+        return _request("POST", url, self.api_key, payload={}, timeout=self.timeout)
+
+    def list_credentials(self, machine_id: str) -> List[Dict[str, Any]]:
+        """List a machine's credentials (admin-only) — ids + status, never secrets."""
+        url = self._url(
+            f"/v1/machines/{urllib.parse.quote(machine_id, safe='')}/credentials"
+        )
+        body = _request("GET", url, self.api_key, timeout=self.timeout)
+        return body.get("credentials") or []
+
 
 __all__ = ["ApiError", "Client"]

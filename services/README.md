@@ -63,19 +63,66 @@ packages regardless of the child's working directory.
 | `GET /v1/events/recent?limit=&repository_id=&event_type=&after_seq=` | Recent events, newest first — see **Pagination** below. |
 | `GET /v1/sync/{client_id}` | A consumer's replay position (`{"client_id", "last_seq", "last_event_id", "updated_at"}`). Unknown `client_id` → `200` with all three fields `null` (not `404`) — a fresh consumer needs no special case. |
 | `PUT /v1/sync/{client_id}` | Upsert that position — body `{"last_seq": int\|null, "last_event_id": str\|null}`. See **`ops.sync_cursors`** below. |
+| `POST /v1/machines/{id}/credentials` | **Admin-only.** Issue a per-machine key. Optional body `{"label"}`. Returns `{"key_id", "secret", "key": "<key_id>.<secret>"}` — the secret is shown **once** and only its hash is stored. `404` if the machine is unknown. |
+| `POST /v1/machines/{id}/credentials/{key_id}/revoke` | **Admin-only.** Revoke a key (idempotent). `404` if unknown for that machine. |
+| `GET /v1/machines/{id}/credentials` | **Admin-only.** List a machine's key ids + status (`created_at`/`last_used_at`/`revoked_at`) — **never** secrets or hashes. |
 | `GET /health` | Liveness only (no data, no DB) — the **one** unauthenticated route. |
 
-**Auth.** Every `/v1` route requires `Authorization: Bearer <AGENT_OS_API_KEY>`,
-compared with `hmac.compare_digest`. `AGENT_OS_API_KEY` may be a single key OR a
-**comma-separated list** — every listed key is accepted, so a key can be rotated
-with an overlap window (add the new key, redeploy clients, then drop the old). A
-server with no key configured fails closed (every request `401`). No credentials
-live in code.
+**Auth (two-phase).** Every `/v1` route requires `Authorization: Bearer <token>`.
+The token is resolved in two phases, both constant-time:
+
+1. **Admin / bootstrap key** — the token is compared with `hmac.compare_digest`
+   against `AGENT_OS_API_KEY`, which may be a single key OR a **comma-separated
+   list** (every listed key is accepted, so a key rotates with an overlap window:
+   add the new key, redeploy clients, then drop the old). The comparison does not
+   short-circuit, so timing never reveals which listed key matched. An admin match
+   is the full-authority identity used to register machines and issue per-machine
+   keys; it **bypasses** machine binding. A server with no key configured fails
+   closed (every request `401`).
+2. **Per-machine key** — only if phase 1 fails and the token has the
+   `<key_id>.<secret>` shape: the `key_id` is looked up `O(1)`, must exist and be
+   un-revoked, and `SHA-256(secret)` must `hmac.compare_digest`-match the stored
+   hash (only the hash is persisted — never the plaintext secret). A match binds
+   the caller to that credential's `machine_id`.
+
+**Machine binding.** A per-machine caller may act only as its own machine,
+enforced against each resource's AUTHORITATIVE owner **at the store layer** — never
+a client-supplied `machine_id` claim, which a caller could spoof or omit.
+`register machine/repository/session` may neither create nor overwrite a resource
+owned by another machine (`403`); `heartbeat` may target only a session the caller
+owns (a cross-machine target is `404` — no mutation, no existence leak); and each
+event's originating `machine_id` must equal the caller's bound machine (a foreign
+event in a batch is rejected per-event, not a whole-batch failure). Admin callers
+bypass binding. This closes the shared-key risk that any key-holder could overwrite
+any machine's registry row.
+
+> **Stopgap — sync cursors are admin-only.** `GET/PUT /v1/sync/<client_id>`
+> (`ops.sync_cursors`) has no per-machine ownership column yet, so to stop a
+> per-machine key from corrupting another consumer's replay position, both are
+> **admin-only** for now. Every current sync consumer uses the shared admin key, so
+> nothing is affected; proper first-writer-wins binding (card `52946159`) must land
+> before any per-machine key is issued to a sync consumer. `AGENT_OS_API_KEY`'s
+**value** on a client may now be EITHER the shared admin key OR a per-machine
+`key_id.secret` — clients present it identically, and the server distinguishes by
+format, so per-machine rollout is pure per-machine `.env` config with no client
+code change. No credentials live in code.
+
+Issue/rotate/revoke keys with the admin CLI `scripts/manage_keys.py` (run with the
+admin `AGENT_OS_API_KEY`): `issue --machine-id … [--label …]`, `list --machine-id
+…`, `revoke --machine-id … --key-id …`. **Rotation:** issue a new key for the
+machine, update that machine's `AGENT_OS_API_KEY`, then revoke the old `key_id` —
+the two overlap so there is no downtime. A lost secret is unrecoverable (only its
+hash is stored): revoke the `key_id` and issue a new one.
+
+> **Not yet: transport encryption (TLS).** This slice is the auth layer only. The
+> API still speaks plain HTTP; a per-machine `key_id.secret` on the wire is only as
+> private as the link. TLS termination (the M3 reverse proxy) is the separate
+> Slice B — do not treat the LAN traffic as encrypted until it lands.
 
 **Errors.** Every error path returns a uniform envelope
 `{"error": {"code": "<machine_readable>", "message": "<human, sanitized>"}}` — no
 stack traces, SQL, or connection details ever reach a response. Codes include
-`unauthorized`, `invalid_payload`, `invalid_status`, `not_found`,
+`unauthorized`, `forbidden`, `invalid_payload`, `invalid_status`, `not_found`,
 `method_not_allowed`, `batch_too_large`, `payload_too_large`, `internal_error`.
 
 **Posture.** Tolerant-reader inputs (bodies validated with the `contracts`
@@ -149,21 +196,27 @@ permanent register-fail loop.
 This phase runs the API on Machine 1 bound to loopback (`127.0.0.1:8765`). A LAN
 bind for M2/M3 (setting `AGENT_OS_API_HOST=0.0.0.0`) is intentionally deferred.
 The **M2 LAN posture is a TLS-terminating reverse proxy** in front of this app
-(e.g. Caddy/nginx/an SSH tunnel): the API itself speaks plain HTTP and holds only
-a shared bearer key, so encryption and any per-machine auth must live in that
-proxy layer before the bind is ever flipped.
+(e.g. Caddy/nginx/an SSH tunnel): the API itself speaks plain HTTP, so
+**encryption still lives in that proxy layer** and must land before the bind is
+ever flipped. Per-machine auth, previously also deferred to the proxy, now lives
+**in the app** (card `8737706e`, Slice A) — see **Auth (two-phase)** above.
 
-Accepted risks for the current single-user / loopback / shared-key posture
-(carried forward from the security review, comment 145 — revisit each before the
-LAN bind):
+Accepted risks for the current single-user / loopback posture (carried forward
+from the security review, comment 145 — revisit each before the LAN bind):
 
-1. **Shared-key auth = no per-machine authorization boundary.** Any holder of the
-   one `AGENT_OS_API_KEY` can register as / heartbeat as / overwrite the registry
-   row of *any* machine/session/repository id. Inherent to a single shared secret
-   (per-machine auth is explicitly out of scope this phase). The key may be a
-   comma-separated list for rotation overlap, but every listed key still has full
-   authority. Acceptable for one user's own machines on a private LAN; needs
-   per-machine credentials before a second party ever holds the key.
+1. **Per-machine authorization boundary — now enforced (Slice A).** The API issues
+   per-machine `key_id.secret` credentials (hashed at rest) and binds each caller
+   to its own `machine_id`, so a per-machine key can no longer register/heartbeat/
+   overwrite *another* machine's registry row, and one machine's key rotates or
+   revokes without touching the others. The shared `AGENT_OS_API_KEY` remains valid
+   as the **admin / bootstrap key** (register machines, issue keys) and — as any
+   full-authority admin secret — still bypasses binding, so it must be held only by
+   the operator. **Remaining gaps:** (a) transport is still plain HTTP — a bearer
+   token (admin or per-machine) is exposed to anyone who can read the link until
+   TLS (Slice B) lands; (b) the sync-cursor endpoints (`/v1/sync/<client_id>`) are
+   an admin-only **stopgap** pending per-machine ownership (card `52946159`). Do not
+   flip the LAN bind, and do not issue a per-machine key to a sync consumer, before
+   those land.
 2. **Default bind is loopback-only.** At `127.0.0.1:8765` only local processes on
    M1 can reach the API, so everything above (and the batch-size ceiling) is
    scoped to "another local process on the same machine" until the LAN bind. At

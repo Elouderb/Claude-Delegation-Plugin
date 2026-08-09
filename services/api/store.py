@@ -218,11 +218,25 @@ class SqlStore:
         canonical_remote: Optional[str],
         project_id: Optional[str],
         created_at: datetime,
-    ) -> Dict[str, Any]:
+        owner_machine_id: Optional[str] = None,
+    ) -> Optional[Dict[str, Any]]:
         integrity_error = self._pyodbc_integrity_error()
         conn = self._connect()
         try:
             cur = conn.cursor()
+            # Ownership guard (per-machine caller): registering over an EXISTING
+            # repository_id owned by a DIFFERENT machine is a hijack — the re-mint
+            # reconciliation below would otherwise re-point another machine's row.
+            # Refuse atomically here (-> handler 403). Admin (owner None) is exempt.
+            if owner_machine_id is not None:
+                cur.execute(
+                    "SELECT machine_id FROM registry.repositories WHERE repository_id = ?",
+                    repository_id,
+                )
+                owner_row = cur.fetchone()
+                if owner_row is not None and owner_row[0] != owner_machine_id:
+                    conn.rollback()
+                    return None
             existing = self._find_repo_by_natural_key(cur, machine_id, repo_root)
             if existing is not None:
                 self._update_repo(cur, existing, canonical_remote, project_id)
@@ -358,7 +372,8 @@ class SqlStore:
         started_at: datetime,
         heartbeat_at: Optional[datetime],
         expires_at: Optional[datetime],
-    ) -> Dict[str, Any]:
+        owner_machine_id: Optional[str] = None,
+    ) -> Optional[Dict[str, Any]]:
         integrity_error = self._pyodbc_integrity_error()
         caps_json = json.dumps(list(capabilities))
         hb = to_utc(heartbeat_at) if heartbeat_at is not None else None
@@ -366,6 +381,19 @@ class SqlStore:
         conn = self._connect()
         try:
             cur = conn.cursor()
+            # Ownership guard (per-machine caller): re-registering an EXISTING
+            # session_id owned by a DIFFERENT machine would overwrite it (the
+            # UPDATE below keys only on session_id). Refuse atomically (-> 403).
+            # Admin (owner None) is exempt.
+            if owner_machine_id is not None:
+                cur.execute(
+                    "SELECT machine_id FROM registry.agent_sessions WHERE session_id = ?",
+                    session_id,
+                )
+                owner_row = cur.fetchone()
+                if owner_row is not None and owner_row[0] != owner_machine_id:
+                    conn.rollback()
+                    return None
             update_sql = (
                 "UPDATE registry.agent_sessions SET agent_id = ?, machine_id = ?, "
                 "repository_id = ?, agent_type = ?, parent_agent_id = ?, status = ?, "
@@ -412,16 +440,31 @@ class SqlStore:
         session_id: str,
         status: Optional[str] = None,
         current_task_id: Optional[str] = None,
+        owner_machine_id: Optional[str] = None,
     ) -> Optional[Dict[str, Any]]:
         conn = self._connect()
         try:
             cur = conn.cursor()
-            cur.execute(
-                "UPDATE registry.agent_sessions SET last_heartbeat_at = SYSDATETIMEOFFSET(), "
-                "status = COALESCE(?, status), current_task_id = COALESCE(?, current_task_id) "
-                "WHERE session_id = ?",
-                status, current_task_id, session_id,
-            )
+            # Machine binding is enforced HERE, against the session's authoritative
+            # owning machine_id — not a spoofable request-body field. A per-machine
+            # caller passes its own machine_id as owner_machine_id; a cross-machine
+            # target then matches 0 rows -> None -> 404, so it can neither mutate
+            # another machine's session nor learn the session exists. Admin callers
+            # pass None (unrestricted).
+            if owner_machine_id is None:
+                cur.execute(
+                    "UPDATE registry.agent_sessions SET last_heartbeat_at = SYSDATETIMEOFFSET(), "
+                    "status = COALESCE(?, status), current_task_id = COALESCE(?, current_task_id) "
+                    "WHERE session_id = ?",
+                    status, current_task_id, session_id,
+                )
+            else:
+                cur.execute(
+                    "UPDATE registry.agent_sessions SET last_heartbeat_at = SYSDATETIMEOFFSET(), "
+                    "status = COALESCE(?, status), current_task_id = COALESCE(?, current_task_id) "
+                    "WHERE session_id = ? AND machine_id = ?",
+                    status, current_task_id, session_id, owner_machine_id,
+                )
             if cur.rowcount == 0:
                 conn.rollback()
                 return None
@@ -862,6 +905,137 @@ class SqlStore:
         columns = [d[0] for d in cur.description]
         return _serialize_row(dict(zip(columns, row)))
 
+    # -- registry.machine_credentials (per-machine API keys, card 8737706e) -- #
+    def machine_exists(self, machine_id: str) -> bool:
+        """True iff ``machine_id`` is a registered machine (issuance 404 guard)."""
+        conn = self._connect()
+        try:
+            cur = conn.cursor()
+            cur.execute(
+                "SELECT 1 FROM registry.machines WHERE machine_id = ?", machine_id
+            )
+            return cur.fetchone() is not None
+        finally:
+            conn.close()
+
+    def get_credential(self, key_id: str) -> Optional[Dict[str, Any]]:
+        """Resolve a credential by its (non-secret) ``key_id`` for auth.
+
+        Returns ``{key_id, machine_id, secret_hash, revoked_at}`` or ``None`` when
+        absent. ``revoked_at`` is ``None`` for an active credential; the auth layer
+        rejects a non-``None`` value. ``secret_hash`` is the stored hex digest the
+        caller compares constant-time — it never leaves the auth path.
+        """
+        conn = self._connect()
+        try:
+            cur = conn.cursor()
+            cur.execute(
+                "SELECT key_id, machine_id, secret_hash, revoked_at "
+                "FROM registry.machine_credentials WHERE key_id = ?",
+                key_id,
+            )
+            row = cur.fetchone()
+            if row is None:
+                return None
+            return {
+                "key_id": row[0],
+                "machine_id": row[1],
+                "secret_hash": row[2],
+                "revoked_at": _iso(row[3]),
+            }
+        finally:
+            conn.close()
+
+    def insert_credential(
+        self, *, key_id: str, machine_id: str, secret_hash: str, label: Optional[str] = None
+    ) -> None:
+        """Insert a new credential row (only the SHA-256 hex hash is stored)."""
+        conn = self._connect()
+        try:
+            cur = conn.cursor()
+            cur.execute(
+                "INSERT INTO registry.machine_credentials "
+                "(key_id, machine_id, secret_hash, label) VALUES (?, ?, ?, ?)",
+                key_id, machine_id, secret_hash, label,
+            )
+            conn.commit()
+        except Exception:
+            conn.rollback()
+            raise
+        finally:
+            conn.close()
+
+    def revoke_credential(self, key_id: str) -> bool:
+        """Soft-revoke a credential (idempotent). Returns whether the key exists.
+
+        Sets ``revoked_at`` only when currently NULL, so re-revoking is a no-op that
+        still returns ``True``. Returns ``False`` only when no such ``key_id`` exists
+        (the endpoint maps that to 404).
+        """
+        conn = self._connect()
+        try:
+            cur = conn.cursor()
+            cur.execute(
+                "UPDATE registry.machine_credentials SET revoked_at = SYSDATETIMEOFFSET() "
+                "WHERE key_id = ? AND revoked_at IS NULL",
+                key_id,
+            )
+            if cur.rowcount and cur.rowcount > 0:
+                exists = True
+            else:
+                cur.execute(
+                    "SELECT 1 FROM registry.machine_credentials WHERE key_id = ?", key_id
+                )
+                exists = cur.fetchone() is not None
+            conn.commit()
+            return exists
+        except Exception:
+            conn.rollback()
+            raise
+        finally:
+            conn.close()
+
+    def list_credentials(self, machine_id: str) -> List[Dict[str, Any]]:
+        """List a machine's credentials — key_ids + status only, NEVER secret_hash."""
+        conn = self._connect()
+        try:
+            cur = conn.cursor()
+            cur.execute(
+                "SELECT key_id, label, created_at, last_used_at, revoked_at "
+                "FROM registry.machine_credentials WHERE machine_id = ? "
+                "ORDER BY created_at DESC",
+                machine_id,
+            )
+            return [_serialize_row(r) for r in self._rows(cur)]
+        finally:
+            conn.close()
+
+    def touch_credential_last_used(self, key_id: str) -> None:
+        """Best-effort refresh of ``last_used_at`` on a successful auth.
+
+        Deliberately swallows every error: this is non-critical telemetry on the
+        hot auth path and must NEVER cause an otherwise-valid request to fail.
+        """
+        try:
+            conn = self._connect()
+        except Exception:
+            return
+        try:
+            cur = conn.cursor()
+            cur.execute(
+                "UPDATE registry.machine_credentials SET last_used_at = SYSDATETIMEOFFSET() "
+                "WHERE key_id = ?",
+                key_id,
+            )
+            conn.commit()
+        except Exception:
+            try:
+                conn.rollback()
+            except Exception:
+                pass
+        finally:
+            conn.close()
+
 
 def _events_json(envelopes: List[Any]) -> str:
     """Serialize envelopes to the JSON array the OPENJSON batch INSERT consumes.
@@ -931,6 +1105,8 @@ class FakeStore:
         self.sync_cursors: Dict[str, Dict[str, Any]] = {}  # mirrors ops.sync_cursors
         self.tasks: Dict[str, Dict[str, Any]] = {}  # mirrors registry.tasks (by global_id)
         self._task_seq = 0  # mirrors registry.tasks.change_seq (ROWVERSION)
+        # mirrors registry.machine_credentials, keyed by key_id (card 8737706e)
+        self.credentials: Dict[str, Dict[str, Any]] = {}
 
     def upsert_machine(self, *, machine_id, name, os, created_at) -> Dict[str, Any]:
         created = machine_id not in self.machines
@@ -941,8 +1117,15 @@ class FakeStore:
         return {"machine_id": machine_id, "created": created}
 
     def upsert_repository(
-        self, *, repository_id, machine_id, repo_root, canonical_remote, project_id, created_at
-    ) -> Dict[str, Any]:
+        self, *, repository_id, machine_id, repo_root, canonical_remote, project_id, created_at,
+        owner_machine_id=None,
+    ) -> Optional[Dict[str, Any]]:
+        # Ownership guard (parity with SqlStore): a per-machine caller may not
+        # register over an existing repository_id owned by another machine.
+        if owner_machine_id is not None:
+            existing_rec = self.repositories.get(repository_id)
+            if existing_rec is not None and existing_rec.get("machine_id") != owner_machine_id:
+                return None
         key = (machine_id, repo_root)
         now = datetime.now(timezone.utc)
         existing = self._repo_natural.get(key)
@@ -979,8 +1162,14 @@ class FakeStore:
     def upsert_session(
         self, *, session_id, agent_id, machine_id, repository_id, agent_type,
         parent_agent_id, capabilities, current_task_id, status, model_runtime,
-        started_at, heartbeat_at, expires_at,
-    ) -> Dict[str, Any]:
+        started_at, heartbeat_at, expires_at, owner_machine_id=None,
+    ) -> Optional[Dict[str, Any]]:
+        # Ownership guard (parity with SqlStore): a per-machine caller may not
+        # re-register a session_id owned by another machine.
+        if owner_machine_id is not None:
+            existing_sess = self.sessions.get(session_id)
+            if existing_sess is not None and existing_sess.get("machine_id") != owner_machine_id:
+                return None
         created = session_id not in self.sessions
         record = self.sessions.get(session_id, {"started_at": _iso(started_at), "ended_at": None})
         record.update({
@@ -995,9 +1184,15 @@ class FakeStore:
         self.sessions[session_id] = record
         return {"session_id": session_id, "created": created}
 
-    def heartbeat_session(self, *, session_id, status=None, current_task_id=None):
+    def heartbeat_session(self, *, session_id, status=None, current_task_id=None,
+                          owner_machine_id=None):
         record = self.sessions.get(session_id)
         if record is None:
+            return None
+        # Ownership binding (parity with SqlStore): a per-machine caller
+        # (owner_machine_id set) may only heartbeat sessions it owns; a
+        # cross-machine target returns None -> 404, no mutation, no existence leak.
+        if owner_machine_id is not None and record.get("machine_id") != owner_machine_id:
             return None
         now = datetime.now(timezone.utc)
         record["last_heartbeat_at"] = _iso(now)
@@ -1160,6 +1355,56 @@ class FakeStore:
         }
         self.sync_cursors[client_id] = record
         return dict(record)
+
+    # -- registry.machine_credentials (per-machine API keys, card 8737706e) -- #
+    def machine_exists(self, machine_id: str) -> bool:
+        return machine_id in self.machines
+
+    def get_credential(self, key_id: str) -> Optional[Dict[str, Any]]:
+        record = self.credentials.get(key_id)
+        if record is None:
+            return None
+        return {
+            "key_id": record["key_id"],
+            "machine_id": record["machine_id"],
+            "secret_hash": record["secret_hash"],
+            "revoked_at": record.get("revoked_at"),
+        }
+
+    def insert_credential(
+        self, *, key_id: str, machine_id: str, secret_hash: str, label: Optional[str] = None
+    ) -> None:
+        now = _iso(datetime.now(timezone.utc))
+        self.credentials[key_id] = {
+            "key_id": key_id, "machine_id": machine_id, "secret_hash": secret_hash,
+            "label": label, "created_at": now, "last_used_at": None, "revoked_at": None,
+        }
+
+    def revoke_credential(self, key_id: str) -> bool:
+        record = self.credentials.get(key_id)
+        if record is None:
+            return False
+        if record.get("revoked_at") is None:
+            record["revoked_at"] = _iso(datetime.now(timezone.utc))
+        return True
+
+    def list_credentials(self, machine_id: str) -> List[Dict[str, Any]]:
+        # NEVER expose secret_hash — mirror SqlStore's projected columns exactly.
+        rows = [
+            {
+                "key_id": r["key_id"], "label": r.get("label"),
+                "created_at": r.get("created_at"), "last_used_at": r.get("last_used_at"),
+                "revoked_at": r.get("revoked_at"),
+            }
+            for r in self.credentials.values()
+            if r.get("machine_id") == machine_id
+        ]
+        return sorted(rows, key=lambda r: r.get("created_at") or "", reverse=True)
+
+    def touch_credential_last_used(self, key_id: str) -> None:
+        record = self.credentials.get(key_id)
+        if record is not None:
+            record["last_used_at"] = _iso(datetime.now(timezone.utc))
 
 
 __all__ = ["ALLOWED_STATUSES", "PreparedEvent", "SqlStore", "FakeStore"]
