@@ -1,32 +1,8 @@
-"""Central memory subsystem (Tier 0) for agent-os.
+"""Local-SQLite memory implementation (the repo-local half of the subsystem).
 
-A fully-local, machine-global vector + full-text corpus store: ingest documents
-(md/txt), ChatGPT conversation exports, and dated news; chunk and embed them;
-retrieve with hybrid BM25 (FTS5) + vector kNN (sqlite-vec) fused via RRF.
-
-This subsystem is OPTIONAL, exactly like the SQL-Server database-graph
-subsystem.  The MCP server must import :mod:`memory_tools` and start with the
-heavy dependencies (``sqlite-vec``, ``sentence-transformers``, a
-loadable-extension-capable SQLite) absent; the tools then report the subsystem
-as unavailable instead of raising.  Only the pure-Python helpers here
-(:mod:`memory.chunking`, :mod:`memory.adapters`, :mod:`memory.retrieval`) import
-cleanly without those dependencies.
+The shared, model-free retrieval core (chunking, adapters, RRF fusion, the
+Embedder/Reranker protocol wrappers, availability plumbing) now lives in the
+top-level :mod:`memory_core` package so ``services/api`` can import the exact
+same code.  What remains here is local-specific: :mod:`memory.store`, the
+machine-global ``memory.sqlite`` implementation the MCP ``memory_*`` tools use.
 """
-
-from .availability import (
-    DEFAULT_EMBEDDING_DIM,
-    DEFAULT_EMBEDDING_MODEL,
-    DEFAULT_RERANKER_MODEL,
-    MemoryUnavailable,
-    check_availability,
-    default_db_path,
-)
-
-__all__ = [
-    "DEFAULT_EMBEDDING_DIM",
-    "DEFAULT_EMBEDDING_MODEL",
-    "DEFAULT_RERANKER_MODEL",
-    "MemoryUnavailable",
-    "check_availability",
-    "default_db_path",
-]

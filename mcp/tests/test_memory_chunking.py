@@ -7,9 +7,9 @@ import sys
 import unittest
 from pathlib import Path
 
-sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
-from memory import chunking  # noqa: E402
+from memory_core import chunking  # noqa: E402
 
 
 class TestEstimateTokens(unittest.TestCase):

@@ -7,9 +7,9 @@ import tempfile
 import unittest
 from pathlib import Path
 
-sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
-from memory.adapters import base, chatgpt, documents  # noqa: E402
+from memory_core.adapters import base, chatgpt, documents  # noqa: E402
 
 _FIXTURE = Path(__file__).resolve().parent / "fixtures" / "chatgpt_conversations.json"
 

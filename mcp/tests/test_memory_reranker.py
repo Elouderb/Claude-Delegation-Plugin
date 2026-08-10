@@ -22,10 +22,11 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 
-sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+sys.path.insert(0, str(Path(__file__).resolve().parents[2]))  # repo root: memory_core
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent))  # mcp: memory.store
 
-from memory import reranker as reranker_mod  # noqa: E402
-from memory.availability import (  # noqa: E402
+from memory_core import reranker as reranker_mod  # noqa: E402
+from memory_core.availability import (  # noqa: E402
     DEFAULT_RERANKER_MODEL,
     MemoryUnavailable,
     check_availability,
@@ -279,7 +280,7 @@ class TestRerankDedupComposition(unittest.TestCase):
 
     def setUp(self):
         from memory.store import MemoryStore
-        from memory.adapters.base import ChunkInput, SourceDocument, sha256_text
+        from memory_core.adapters.base import ChunkInput, SourceDocument, sha256_text
 
         self._tmp = tempfile.TemporaryDirectory(prefix="agent_os_rrdd_")
         self.root = Path(self._tmp.name)
