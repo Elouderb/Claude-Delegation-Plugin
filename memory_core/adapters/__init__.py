@@ -6,19 +6,23 @@ message-boundary), producing documents + chunks the store can persist verbatim.
 """
 
 from .base import (
+    USER_SOURCE_TYPES,
     VALID_SOURCE_TYPES,
     ChunkInput,
     SourceDocument,
     detect_and_load,
+    load_content,
     load_path,
     validate_iso_date,
 )
 
 __all__ = [
+    "USER_SOURCE_TYPES",
     "VALID_SOURCE_TYPES",
     "ChunkInput",
     "SourceDocument",
     "detect_and_load",
+    "load_content",
     "load_path",
     "validate_iso_date",
 ]

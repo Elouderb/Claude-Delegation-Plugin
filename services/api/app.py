@@ -26,15 +26,17 @@ import json
 import os
 import secrets
 from dataclasses import dataclass
-from typing import Any, Optional, Tuple
+from typing import Any, Callable, Optional, Tuple
 
 from flask import Flask, g, jsonify, request
 from pydantic import ValidationError
 
 from contracts.events import EventEnvelope
-from contracts.identifiers import generate_ulid
+from contracts.identifiers import MEMORY, generate_ulid, new_id
 from contracts.identity import MachineIdentity, RepositoryIdentity
 from contracts.registry import AgentRegistration
+from memory_core.adapters import load_content
+from memory_core.availability import MemoryUnavailable, check_availability
 
 from .store import ALLOWED_STATUSES, PreparedEvent
 
@@ -63,6 +65,11 @@ _MAX_CONTENT_LENGTH = 40 * 1024 * 1024  # 40 MiB
 # a clean 400 instead of letting a driver-level truncation error surface as 500.
 _MAX_CLIENT_ID_CHARS = 64
 
+# memory.documents.source_path is NVARCHAR(1000); reject an oversized identity key
+# at the app layer with a clean 400 rather than a driver truncation 500 (mirrors
+# the client_id guard above). Content itself is bounded by MAX_CONTENT_LENGTH.
+_MAX_SOURCE_PATH_CHARS = 1000
+
 # ops.sync_cursors.last_seq is a SQL BIGINT (see database/migrations/005). Reject
 # an out-of-range value (negative, or beyond BIGINT max) at the app layer with a
 # clean 400: a negative value would otherwise be accepted and later make a
@@ -90,7 +97,13 @@ class AuthContext:
     key_id: Optional[str] = None
 
 
-def create_app(*, api_key: Optional[str] = None, store: Optional[Any] = None) -> Flask:
+def create_app(
+    *,
+    api_key: Optional[str] = None,
+    store: Optional[Any] = None,
+    memory_store: Optional[Any] = None,
+    memory_embedder: Optional[Callable[[], Any]] = None,
+) -> Flask:
     """Build the Agent OS API Flask app.
 
     ``api_key`` defaults to the ``AGENT_OS_API_KEY`` environment variable. It may
@@ -101,6 +114,14 @@ def create_app(*, api_key: Optional[str] = None, store: Optional[Any] = None) ->
     authenticate nobody). ``store`` defaults to a
     :class:`~services.api.store.SqlStore` over :func:`database.migrate.connect`;
     tests inject a :class:`~services.api.store.FakeStore`.
+
+    ``memory_store`` / ``memory_embedder`` back ``POST /v1/memory/ingest`` and are
+    injected the same way as ``store``: ``memory_store`` defaults to a
+    :class:`~services.api.memory_store.MemoryStore` over
+    :func:`database.migrate.connect`, and ``memory_embedder`` is a zero-arg factory
+    resolving the hub-side embedder (default: availability-gated bge-small). Tests
+    inject a :class:`~services.api.memory_store.FakeMemoryStore` + a deterministic
+    fake embedder factory so ingest runs with no SQL Server and no real model.
     """
     app = Flask(__name__)
     resolved_key = api_key if api_key is not None else os.environ.get(_API_KEY_ENV)
@@ -114,6 +135,15 @@ def create_app(*, api_key: Optional[str] = None, store: Optional[Any] = None) ->
         from .store import SqlStore
 
         store = SqlStore(migrate.connect)
+
+    if memory_store is None:
+        from database import migrate
+
+        from .memory_store import MemoryStore
+
+        memory_store = MemoryStore(migrate.connect)
+    if memory_embedder is None:
+        memory_embedder = _default_embedder_factory
 
     # ----------------------------------------------------------------- auth #
     @app.before_request
@@ -277,6 +307,85 @@ def create_app(*, api_key: Optional[str] = None, store: Optional[Any] = None) ->
             app.logger.exception("event ingest failed")
             return _error(500, "internal_error", "event ingestion failed")
         return jsonify({"results": outcomes}), 200
+
+    # ------------------------------------------------------- memory ingest #
+    @app.post("/v1/memory/ingest")
+    def ingest_memory():
+        """Ingest raw document content into the central memory corpus (WRITE path).
+
+        The hub chunks → embeds (hub-side) → dedups → INSERTs into
+        ``memory.documents`` / ``memory.chunks`` (migration 008). Behind
+        ``_require_auth`` (memory is private — no unauthenticated route).
+        Availability-gated: if the memory extras/model are absent the caller gets
+        a clean 503, never a 500/crash. SYNCHRONOUS — the summary is returned once
+        the write commits, mirroring the local ``memory_ingest`` tool result so a
+        future client keeps an unchanged UX.
+        """
+        data = request.get_json(silent=True)
+        if not isinstance(data, dict):
+            return _error(400, "invalid_payload", "expected a JSON object")
+        content = data.get("content")
+        if not isinstance(content, str) or not content.strip():
+            return _error(400, "invalid_payload", "content is required")
+        source_type = data.get("source_type")
+        if source_type is not None and not isinstance(source_type, str):
+            return _error(400, "invalid_payload", "source_type must be a string")
+        source_path = data.get("source_path")
+        if source_path is not None:
+            if not isinstance(source_path, str):
+                return _error(400, "invalid_payload", "source_path must be a string")
+            if len(source_path) > _MAX_SOURCE_PATH_CHARS:
+                return _error(400, "invalid_payload", "source_path is too long")
+        published_at = data.get("published_at")
+        if published_at is not None and not isinstance(published_at, str):
+            return _error(400, "invalid_payload", "published_at must be a string")
+
+        # Build SourceDocuments (adapter-detect ChatGPT export vs prose) via the
+        # SAME memory_core code the local ingest uses. A bad source_type, a
+        # missing published_at for news, or a bad ISO date is a client error → 400.
+        try:
+            docs = load_content(
+                content,
+                source_type=source_type,
+                source_path=source_path or None,
+                published_at=published_at,
+                mint_doc_id=lambda: new_id(MEMORY),
+            )
+        except ValueError as exc:
+            return _error(400, "invalid_payload", str(exc))
+
+        # Availability gate: resolve the hub-side embedder. Absent extras/model →
+        # a clean 503 (mirrors the memory_* MCP tools' unavailable result).
+        try:
+            embedder = memory_embedder()
+        except MemoryUnavailable:
+            return _error(503, "memory_unavailable", "memory subsystem unavailable")
+
+        # Provenance: a per-machine caller's OWN machine (authoritative, from the
+        # resolved credential); an admin may name one in the body, or None.
+        auth = g.auth
+        if auth.is_admin:
+            body_machine = data.get("source_machine_id")
+            source_machine_id = body_machine if isinstance(body_machine, str) else None
+        else:
+            source_machine_id = auth.machine_id
+
+        try:
+            summary = memory_store.ingest_documents(
+                docs, embedder, source_machine_id=source_machine_id
+            )
+        except MemoryUnavailable:
+            return _error(503, "memory_unavailable", "memory subsystem unavailable")
+        except Exception:
+            app.logger.exception("memory ingest failed")
+            return _error(500, "internal_error", "memory ingestion failed")
+
+        return jsonify({
+            "available": True,
+            "operation": "memory_ingest",
+            "documents_detected": len(docs),
+            **summary,
+        }), 200
 
     # ------------------------------------------------------------- reads #
     @app.get("/v1/machines")
@@ -555,6 +664,23 @@ def _require_machine_match(body_machine_id: Optional[str]) -> Optional[Tuple[Any
     if body_machine_id is not None and body_machine_id != auth.machine_id:
         return _error(403, "forbidden", "machine binding: key does not match machine_id")
     return None
+
+
+def _default_embedder_factory() -> Any:
+    """Resolve the hub-side default embedder, or raise MemoryUnavailable.
+
+    Availability-gated exactly like the memory_* MCP tools (``check_availability``)
+    then loads the memoized bge-small embedder. Called per ingest request but the
+    embedder is process-cached by ``get_default_embedder``'s ``lru_cache``, so the
+    model loads at most once per process. Heavy imports stay lazy (inside the
+    function) so importing this module never pulls sentence-transformers/torch.
+    """
+    availability = check_availability()
+    if not availability.get("available"):
+        raise MemoryUnavailable(availability.get("hint") or "memory subsystem unavailable")
+    from memory_core.embeddings import get_default_embedder
+
+    return get_default_embedder()
 
 
 def _mint_credential() -> Tuple[str, str, str]:

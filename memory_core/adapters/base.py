@@ -20,7 +20,7 @@ import re
 from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
-from typing import List, Optional, Tuple
+from typing import Callable, List, Optional, Tuple
 
 # Extensions handled as prose documents / news.
 _PROSE_SUFFIXES = {".md", ".markdown", ".txt", ".text"}
@@ -135,6 +135,114 @@ def load_path(
     if path.suffix.lower() in _PROSE_SUFFIXES:
         return documents.load(path, source_type=source_type, published_at=published_at)
     return []
+
+
+def _content_looks_like_chatgpt(content: str) -> bool:
+    """Cheaply decide whether raw content is a ChatGPT conversations export.
+
+    The content analog of :func:`_looks_like_chatgpt_export` (which sniffs a
+    file): the payload must start like JSON (``{``/``[``) and contain the
+    ``"mapping"`` key within a bounded prefix.  A false positive is harmless —
+    :func:`chatgpt.load_export` yields no documents for a non-export JSON.
+    """
+    head = content.lstrip()[:1]
+    if head not in ("{", "["):
+        return False
+    return '"mapping"' in content[:_SNIFF_BYTES]
+
+
+def load_content(
+    content: str,
+    *,
+    source_type: Optional[str] = None,
+    source_path: Optional[str] = None,
+    published_at: Optional[str] = None,
+    mint_doc_id: Optional[Callable[[], str]] = None,
+) -> List[SourceDocument]:
+    """Build SourceDocuments from raw in-memory ``content`` (the hub ingest path).
+
+    The content analog of :func:`detect_and_load` / :func:`load_path`: the central
+    API receives document content over HTTP rather than a filesystem path, so this
+    reuses the SAME adapters/chunking (``chatgpt.load_export``, ``chunk_prose``,
+    ``sha256_text``, ``_doc_id``) with no re-implementation or behavioral drift.
+
+    Source-type validation mirrors :func:`detect_and_load` exactly (up-front,
+    before detection): ``source_type`` must be one of :data:`USER_SOURCE_TYPES`
+    (``chatgpt_conversation`` is adapter-assigned, never a caller value), ``news``
+    requires ``published_at``, and ``published_at`` is validated as an ISO date.
+
+    Identity (the hub's dual-key policy):
+
+    * A ChatGPT export keeps each conversation's own conversation-derived id
+      (``cg_...``), exactly like the file path.
+    * Prose derives a deterministic ``_doc_id("doc", source_path)`` when a
+      ``source_path`` identity key is supplied (so re-ingesting the same source
+      replaces it), else ``mint_doc_id()`` when provided (the API injects
+      ``contracts.identifiers.new_id(MEMORY)`` → a fresh ``mem_<ULID>``), else a
+      deterministic content-hash-derived id (standalone fallback).
+    """
+    if not isinstance(content, str):
+        raise ValueError("content must be a string")
+
+    # Up-front source_type validation, byte-identical to detect_and_load's.
+    if source_type is not None and source_type not in USER_SOURCE_TYPES:
+        raise ValueError(
+            f"invalid source_type {source_type!r}; expected one of {USER_SOURCE_TYPES} "
+            "('chatgpt_conversation' is adapter-assigned, not a caller option)"
+        )
+    if source_type == "news" and not published_at:
+        raise ValueError("source_type 'news' requires published_at")
+    published_at = validate_iso_date(published_at, "published_at")
+
+    # Imported here (like load_path) to keep the package import graph acyclic.
+    from . import chatgpt, documents
+
+    if _content_looks_like_chatgpt(content):
+        if source_path:
+            # Stable identity: a conversation with no id of its own keys off
+            # "<source_path>#<index>", so re-ingesting the same export replaces it.
+            return chatgpt.load_export(content, source_path)
+        # Anonymous ingest (no source_path) has NO stable identity. A conversation
+        # WITH its own conversation_id still keys off that id (re-ingesting the same
+        # conversation dedups by content hash at the store), but an ID-LESS
+        # conversation must NOT collapse onto a constant sentinel-derived id — that
+        # bug made two unrelated anonymous ingests share a doc_id and the second
+        # silently OVERWRITE the first. Route a FRESH per-request token through the
+        # adapter's "<base>#<index>" fallback so each id-less conversation gets a
+        # unique id (mirroring the prose path, which mints a fresh mem_<ULID> when
+        # source_path is None), then blank the synthetic source_path back to None
+        # (it is not a real client path). The store's global content-hash UNIQUE
+        # then dedups genuinely-identical re-ingests without ever overwriting.
+        token = mint_doc_id() if mint_doc_id is not None else sha256_text(content)
+        docs = chatgpt.load_export(content, token)
+        for doc in docs:
+            doc.source_path = None
+        return docs
+
+    st = source_type or "document"
+    content_hash = sha256_text(content)
+    if source_path:
+        doc_id = _doc_id("doc", source_path)
+    elif mint_doc_id is not None:
+        doc_id = mint_doc_id()
+    else:
+        doc_id = _doc_id("doc", content_hash)
+    chunks = [
+        ChunkInput(seq=i, text=chunk_text, meta={})
+        for i, chunk_text in enumerate(documents.chunk_prose(content))
+    ]
+    return [
+        SourceDocument(
+            doc_id=doc_id,
+            title=documents.title_from_content(content),
+            source_type=st,
+            source_path=source_path,
+            content_hash=content_hash,
+            provenance="uploaded",
+            published_at=published_at,
+            chunks=chunks,
+        )
+    ]
 
 
 def detect_and_load(
