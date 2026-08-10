@@ -215,5 +215,62 @@ class TestDetectAndLoad(unittest.TestCase):
             base.detect_and_load(str(p))
 
 
+class TestLoadContent(unittest.TestCase):
+    """The content analog of detect_and_load used by the hub ingest endpoint."""
+
+    def test_prose_with_source_path_is_deterministic_doc_id(self):
+        docs = base.load_content("# Cats\n\nCats purr.", source_path="/corpus/cats.md")
+        self.assertEqual(len(docs), 1)
+        doc = docs[0]
+        self.assertEqual(doc.source_type, "document")
+        self.assertEqual(doc.provenance, "uploaded")
+        self.assertEqual(doc.source_path, "/corpus/cats.md")
+        self.assertEqual(doc.title, "Cats")
+        self.assertEqual(doc.doc_id, base._doc_id("doc", "/corpus/cats.md"))
+        # Re-deriving from the same path is stable (drives replace-on-change).
+        again = base.load_content("Different text.", source_path="/corpus/cats.md")
+        self.assertEqual(again[0].doc_id, doc.doc_id)
+
+    def test_prose_without_source_path_uses_injected_minter(self):
+        docs = base.load_content("Some content.", mint_doc_id=lambda: "mem_ULIDSENTINEL")
+        self.assertEqual(docs[0].doc_id, "mem_ULIDSENTINEL")
+        self.assertIsNone(docs[0].source_path)
+
+    def test_prose_without_source_path_or_minter_is_content_addressed(self):
+        text = "Standalone content with no identity key."
+        d1 = base.load_content(text)
+        d2 = base.load_content(text)
+        self.assertEqual(d1[0].doc_id, d2[0].doc_id)  # deterministic fallback
+
+    def test_news_requires_published_at(self):
+        with self.assertRaises(ValueError):
+            base.load_content("x", source_type="news", source_path="/n.md")
+        ok = base.load_content(
+            "market report", source_type="news", source_path="/n.md",
+            published_at="2024-01-15",
+        )
+        self.assertEqual(ok[0].source_type, "news")
+        self.assertEqual(ok[0].published_at, "2024-01-15")
+
+    def test_adapter_assigned_type_is_rejected(self):
+        with self.assertRaises(ValueError):
+            base.load_content("x", source_type="chatgpt_conversation")
+
+    def test_chatgpt_export_content_detected(self):
+        text = _FIXTURE.read_text(encoding="utf-8")
+        docs = base.load_content(text, source_path="/uploads/export.json")
+        self.assertEqual(len(docs), 2)
+        self.assertTrue(all(d.source_type == "chatgpt_conversation" for d in docs))
+        self.assertTrue(all(d.doc_id.startswith("cg_") for d in docs))
+
+    def test_load_export_matches_file_load(self):
+        # load(path) delegates to load_export(text, path): identical documents.
+        text = _FIXTURE.read_text(encoding="utf-8")
+        from_file = chatgpt.load(_FIXTURE)
+        from_text = chatgpt.load_export(text, str(_FIXTURE.resolve()))
+        self.assertEqual([d.doc_id for d in from_file], [d.doc_id for d in from_text])
+        self.assertEqual([d.title for d in from_file], [d.title for d in from_text])
+
+
 if __name__ == "__main__":
     unittest.main()

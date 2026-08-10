@@ -166,11 +166,16 @@ def _conversation_to_document(
     )
 
 
-def load(path: Path) -> List[SourceDocument]:
-    """Parse a ChatGPT export file into one SourceDocument per conversation."""
-    abspath = str(path.resolve())
-    with path.open("r", encoding="utf-8") as fh:
-        data = json.load(fh)
+def load_export(text: str, source_path: str) -> List[SourceDocument]:
+    """Parse a ChatGPT export JSON STRING into one SourceDocument per conversation.
+
+    The content analog of :func:`load`: :func:`load` reads a file then delegates
+    here, so the hub (which receives export content over HTTP, not a file path)
+    can reuse the EXACT same parsing/linearization/chunking with no drift.
+    ``source_path`` is the origin label recorded on each document and the
+    ``<path>#<index>`` fallback when a conversation carries no id of its own.
+    """
+    data = json.loads(text)
 
     if isinstance(data, dict):
         conversations = [data]
@@ -181,7 +186,14 @@ def load(path: Path) -> List[SourceDocument]:
 
     docs: List[SourceDocument] = []
     for index, conversation in enumerate(conversations):
-        doc = _conversation_to_document(conversation, abspath, index)
+        doc = _conversation_to_document(conversation, source_path, index)
         if doc is not None:
             docs.append(doc)
     return docs
+
+
+def load(path: Path) -> List[SourceDocument]:
+    """Parse a ChatGPT export file into one SourceDocument per conversation."""
+    abspath = str(path.resolve())
+    with path.open("r", encoding="utf-8") as fh:
+        return load_export(fh.read(), abspath)

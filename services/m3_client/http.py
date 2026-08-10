@@ -195,6 +195,28 @@ class Client:
             timeout=self.timeout, ssl_context=self._ssl_context,
         )
 
+    # -- central memory (write path) --------------------------------------- #
+    def ingest_memory(
+        self, content: str, *, source_type: Optional[str] = None,
+        source_path: Optional[str] = None, published_at: Optional[str] = None,
+    ) -> Dict[str, Any]:
+        """POST raw document content to ``/v1/memory/ingest`` (hub-side chunk +
+        embed + store). Returns the ingest summary body. ``source_path`` is the
+        optional identity key (re-ingesting the same one replaces it); ``news``
+        requires ``published_at``. The corpus ETL uses a direct DB path, not this
+        endpoint — this is for future thin-client use."""
+        payload: Dict[str, Any] = {"content": content}
+        if source_type is not None:
+            payload["source_type"] = source_type
+        if source_path is not None:
+            payload["source_path"] = source_path
+        if published_at is not None:
+            payload["published_at"] = published_at
+        return _request(
+            "POST", self._url("/v1/memory/ingest"), self.api_key, payload=payload,
+            timeout=self.timeout, ssl_context=self._ssl_context,
+        )
+
     # -- per-machine credential management (admin key required) ------------- #
     def issue_credential(
         self, machine_id: str, *, label: Optional[str] = None

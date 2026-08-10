@@ -25,6 +25,33 @@ def _title_from(path: Path, text: str) -> str:
     return path.stem
 
 
+# Cap for a derived title so it fits the central store's title column
+# (memory.documents.title is NVARCHAR(1000), migration 008): an unbounded H1
+# would otherwise overflow at INSERT and drop the whole document into
+# documents_failed. The first-line fallback is capped tighter (a title, not a
+# paragraph).
+_MAX_TITLE_CHARS = 1000
+_MAX_FIRST_LINE_TITLE_CHARS = 200
+
+
+def title_from_content(text: str, fallback: str = "Untitled") -> str:
+    """Derive a title for hub-ingested content that has no filename.
+
+    Prefers a leading Markdown H1, else the first non-empty line, else
+    ``fallback`` — always truncated to fit the store's NVARCHAR(1000) title
+    column.  Distinct from :func:`_title_from` (whose non-H1 fallback is the file
+    *stem*): the content path has no path to fall back to, so it uses the first
+    line instead.  Used by :func:`memory_core.adapters.base.load_content`.
+    """
+    for line in text.splitlines():
+        stripped = line.strip()
+        if stripped.startswith("# "):
+            return (stripped[2:].strip() or fallback)[:_MAX_TITLE_CHARS]
+        if stripped:
+            return stripped[:_MAX_FIRST_LINE_TITLE_CHARS]
+    return fallback
+
+
 def load(
     path: Path,
     source_type: Optional[str] = None,
