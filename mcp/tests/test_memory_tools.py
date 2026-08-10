@@ -16,10 +16,11 @@ from pathlib import Path
 from unittest.mock import patch
 
 _MCP_DIR = Path(__file__).resolve().parent.parent
-sys.path.insert(0, str(_MCP_DIR))
+sys.path.insert(0, str(_MCP_DIR.parent))  # repo root: memory_core
+sys.path.insert(0, str(_MCP_DIR))  # mcp: memory_tools
 
 import memory_tools  # noqa: E402
-from memory.availability import MemoryUnavailable, check_availability  # noqa: E402
+from memory_core.availability import MemoryUnavailable, check_availability  # noqa: E402
 
 # Subprocess script: block the optional heavy deps entirely (via a find_spec
 # meta-path finder), then confirm the server still imports, the card tools still
@@ -192,7 +193,7 @@ class TestMemoryToolsHappyPath(unittest.TestCase):
     """
 
     def setUp(self):
-        import memory.embeddings as embeddings
+        import memory_core.embeddings as embeddings
 
         self._embeddings = embeddings
         self._tmp = tempfile.TemporaryDirectory(prefix="agent_os_memtools_")
@@ -242,7 +243,7 @@ class TestMemoryToolsHappyPath(unittest.TestCase):
                 # Prefer the warehouse/widget text so ordering visibly changes.
                 return [10.0 if "warehouse" in t else 0.0 for t in texts]
 
-        import memory.reranker as reranker
+        import memory_core.reranker as reranker
 
         with patch.object(memory_tools, "check_availability", return_value=_AVAILABLE):
             with patch.object(self._embeddings, "get_default_embedder", return_value=_StubEmbedder384()):
@@ -258,7 +259,7 @@ class TestMemoryToolsHappyPath(unittest.TestCase):
     def test_rerank_unavailable_model_returns_clean_unavailable(self):
         # Deps present (gate passes) but the reranker MODEL cannot load ->
         # MemoryUnavailable -> clean unavailable result, never a crash.
-        import memory.reranker as reranker
+        import memory_core.reranker as reranker
 
         def _boom():
             raise MemoryUnavailable("reranker model 'x' could not be loaded")

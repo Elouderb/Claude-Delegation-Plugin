@@ -30,22 +30,22 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Dict, List, Optional, Sequence
 
-from .adapters import (
+from memory_core.adapters import (
     VALID_SOURCE_TYPES,
     SourceDocument,
     detect_and_load,
     validate_iso_date,
 )
-from .availability import (
+from memory_core.availability import (
     _INSTALL_HINT,
     DEFAULT_EMBEDDING_DIM,
     MemoryUnavailable,
     default_db_path,
     resolve_sqlite_module,
 )
-from .embeddings import Embedder
-from .reranker import Reranker
-from .retrieval import RRF_K, fuse_ranked_ids
+from memory_core.embeddings import Embedder
+from memory_core.reranker import Reranker
+from memory_core.retrieval import RRF_K, fuse_ranked_ids
 
 # Current on-disk schema version (PRAGMA user_version).  Bump + add a migration
 # step in _ensure_schema when the schema changes in a future phase.

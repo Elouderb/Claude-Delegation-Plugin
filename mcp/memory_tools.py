@@ -22,7 +22,7 @@ import os
 from typing import Callable, Optional
 
 from graph_io import log
-from memory.availability import (
+from memory_core.availability import (
     DEFAULT_EMBEDDING_DIM,
     DEFAULT_EMBEDDING_MODEL,
     DEFAULT_RERANKER_MODEL,
@@ -96,7 +96,7 @@ def memory_ingest(
     """
 
     def _do() -> dict:
-        from memory.embeddings import get_default_embedder
+        from memory_core.embeddings import get_default_embedder
 
         store = _new_store()
         embedder = get_default_embedder()
@@ -160,7 +160,7 @@ def memory_query(
     def _do() -> dict:
         if not isinstance(top_k, int) or isinstance(top_k, bool) or top_k < 1 or top_k > _MAX_TOP_K:
             raise ValueError(f"top_k must be an integer in 1..{_MAX_TOP_K}, got {top_k!r}")
-        from memory.embeddings import get_default_embedder
+        from memory_core.embeddings import get_default_embedder
 
         store = _new_store()
         embedder = get_default_embedder()
@@ -169,7 +169,7 @@ def memory_query(
             # Built only when reranking is requested, so the base query path never
             # loads the cross-encoder.  An absent dep / model raises
             # MemoryUnavailable, which _run turns into a clean unavailable result.
-            from memory.reranker import get_default_reranker
+            from memory_core.reranker import get_default_reranker
 
             reranker = get_default_reranker()
         results = store.query(

@@ -16,9 +16,10 @@ import threading
 import unittest
 from pathlib import Path
 
-sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+sys.path.insert(0, str(Path(__file__).resolve().parents[2]))  # repo root: memory_core
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent))  # mcp: memory.store
 
-from memory.availability import check_availability  # noqa: E402
+from memory_core.availability import check_availability  # noqa: E402
 
 _STORAGE = check_availability()["storage_available"]
 
@@ -490,7 +491,7 @@ class TestDedupPoolSizing(unittest.TestCase):
 class TestDedupByDoc(unittest.TestCase):
     def setUp(self):
         from memory.store import MemoryStore
-        from memory.adapters.base import ChunkInput, SourceDocument, sha256_text
+        from memory_core.adapters.base import ChunkInput, SourceDocument, sha256_text
 
         self._tmp = tempfile.TemporaryDirectory(prefix="agent_os_dedup_")
         self.root = Path(self._tmp.name)
