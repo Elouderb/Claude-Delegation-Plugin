@@ -81,6 +81,13 @@ _MAX_SOURCE_PATH_CHARS = 1000
 # an unbounded-work footgun. Rejected with a clean 400.
 _MEMORY_MAX_TOP_K = 1000
 
+# Endpoint-specific cap on the /v1/memory/query query string. It is embedded
+# HUB-SIDE (CPU cost) before any retrieval, so bound it well below the shared
+# 40 MiB body limit; a real query is a handful of words (the embedder truncates
+# at ~512 tokens anyway). Flagged by Slice-2 security + code review as a cheap
+# DoS guard on a now-network-reachable path. Rejected with a clean 400.
+_MEMORY_MAX_QUERY_CHARS = 4096
+
 # ops.sync_cursors.last_seq is a SQL BIGINT (see database/migrations/005). Reject
 # an out-of-range value (negative, or beyond BIGINT max) at the app layer with a
 # clean 400: a negative value would otherwise be accepted and later make a
@@ -422,6 +429,8 @@ def create_app(
         query = data.get("query")
         if not isinstance(query, str) or not query.strip():
             return _error(400, "invalid_payload", "query is required")
+        if len(query) > _MEMORY_MAX_QUERY_CHARS:
+            return _error(400, "invalid_payload", f"query must be <= {_MEMORY_MAX_QUERY_CHARS} characters")
 
         top_k = data.get("top_k", 8)
         if isinstance(top_k, bool) or not isinstance(top_k, int) or not (1 <= top_k <= _MEMORY_MAX_TOP_K):

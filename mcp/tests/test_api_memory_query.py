@@ -348,6 +348,7 @@ class TestQueryEndpoint(unittest.TestCase):
             {"query": "q", "rerank_pool": 0},       # rerank_pool < 1
             {"query": "q", "max_per_doc": 0},       # max_per_doc < 1
             {"query": "q", "date_from": 5},         # non-str date
+            {"query": "x" * 4097},                  # query over the length cap
         ]
         for body in bad_bodies:
             resp = client.post("/v1/memory/query", headers=_AUTH, json=body)
