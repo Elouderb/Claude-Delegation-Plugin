@@ -28,6 +28,31 @@ creates uses ``DATETIMEOFFSET`` for its UTC-aware timestamps (including the
 runner's own ``ops.schema_migrations.applied_at``), so :func:`connect` always
 registers :func:`_decode_datetimeoffset` before returning the connection.
 
+Non-transactional migrations
+-----------------------------
+Every migration is applied inside one transaction by default (commit on
+success, rollback on any batch failure — see :func:`apply_migration`). Some
+SQL Server DDL (``CREATE FULLTEXT CATALOG``/``CREATE FULLTEXT INDEX``,
+``CREATE DATABASE``, ``ALTER DATABASE ... SET``, backup/restore, ...) cannot
+run inside a user transaction AT ALL — SQL Server raises error 574
+(SQLSTATE 42000) if you try. A migration file opts out of the transaction
+wrapper with a ``-- migrate:no-transaction`` directive: a standalone comment
+line matching that exact text ANYWHERE in the file's leading header (the
+contiguous run of blank/``--``-comment lines before the first real SQL
+statement — not required to be literally line 1, since migrations here open
+with long structured rationale comments; see
+:func:`_parses_no_transaction_directive`). Such a migration runs every
+GO-separated batch, and the ``ops.schema_migrations`` bookkeeping INSERT,
+with the connection in AUTOCOMMIT instead: each statement commits itself
+immediately. **THERE IS NO ROLLBACK ON THIS PATH** — a failure partway
+through leaves every earlier batch permanently applied and the migration
+unrecorded (still "pending"). Every no-transaction migration MUST therefore
+be written idempotently (an ``IF NOT EXISTS``/``IF EXISTS`` guard on every
+statement) so re-running it after a partial failure — or after it already
+fully applied — is always safe. This is enforced by author/reviewer
+discipline, not by this module. All migrations 001-008 are transactional
+(the default) and are unaffected by this option.
+
 Design decisions (documented per the card's "your call, document it"):
 
   * **ID column width**: every prefixed-ULID id column (``machine_id``,
@@ -94,6 +119,14 @@ _GO_SEPARATOR_RE = re.compile(r"^[ \t]*GO[ \t]*$", re.MULTILINE | re.IGNORECASE)
 # ODBC SQL type for SQL Server's DATETIMEOFFSET (SQL_SS_TIMESTAMPOFFSET).
 SQL_SS_TIMESTAMPOFFSET = -155
 
+# Header directive that opts a migration OUT of the single-transaction
+# wrapper (see the module docstring's "Non-transactional migrations"
+# section). Matched against a stripped comment line, so leading/trailing
+# whitespace around the "--" and the directive text is tolerated.
+_NO_TRANSACTION_DIRECTIVE_RE = re.compile(
+    r"^--\s*migrate:no-transaction\s*$", re.IGNORECASE
+)
+
 
 def _decode_datetimeoffset(raw: bytes) -> datetime.datetime:
     """pyodbc output converter: SQL_SS_TIMESTAMPOFFSET wire bytes -> aware datetime.
@@ -150,11 +183,15 @@ def load_connection_string() -> str:
 def connect(timeout: int = 30) -> "pyodbc.Connection":
     """Open a pyodbc connection to the central DB with autocommit OFF.
 
-    Autocommit is off because migrations are applied transactionally — one
-    commit-or-rollback per migration file (see :func:`apply_migration`). The
-    DATETIMEOFFSET output converter is always registered (see module
-    docstring) so reading any DATETIMEOFFSET column, including the runner's
-    own bookkeeping table, never raises.
+    Autocommit is off because migrations are applied transactionally by
+    default — one commit-or-rollback per migration file (see
+    :func:`apply_migration`). A ``-- migrate:no-transaction`` migration
+    (see module docstring) flips ``conn.autocommit`` to ``True`` for the
+    duration of that one migration and restores it to ``False`` afterward,
+    so this connection-level default holds for every other migration in the
+    same run. The DATETIMEOFFSET output converter is always registered (see
+    module docstring) so reading any DATETIMEOFFSET column, including the
+    runner's own bookkeeping table, never raises.
     """
     pyodbc = _require_pyodbc()
     conn = pyodbc.connect(load_connection_string(), timeout=timeout, autocommit=False)
@@ -181,6 +218,11 @@ class Migration:
     path: Path
     checksum: str
     text: str
+    # True iff the file's header carries "-- migrate:no-transaction" (see
+    # module docstring and _parses_no_transaction_directive). Defaults False
+    # so every existing migration (001-008), which never sets this, is
+    # unaffected.
+    no_transaction: bool = False
 
 
 def compute_checksum(text: str) -> str:
@@ -203,6 +245,33 @@ def split_batches(sql_text: str) -> List[str]:
     """
     parts = _GO_SEPARATOR_RE.split(sql_text)
     return [part.strip() for part in parts if part.strip()]
+
+
+def _parses_no_transaction_directive(text: str) -> bool:
+    """Whether ``text``'s header opts out of the single-transaction wrapper.
+
+    The directive is a standalone comment line ``-- migrate:no-transaction``
+    ANYWHERE within the migration's leading header — the contiguous run of
+    blank and ``--``-comment lines at the top of the file, before the first
+    real SQL statement — rather than forced onto literal line 1. This
+    matches how migrations in this repo are actually written: every one
+    opens with a long structured comment block (rationale, batch layout,
+    conventions — see 008's header), and the directive naturally belongs
+    alongside that "why". Scanning stops at the first non-blank,
+    non-comment line, so an incidental occurrence of this exact text deep
+    inside a DDL batch (e.g. a string literal) is never misread as the
+    directive.
+    """
+    for line in text.splitlines():
+        stripped = line.strip()
+        if not stripped:
+            continue
+        if stripped.startswith("--"):
+            if _NO_TRANSACTION_DIRECTIVE_RE.match(stripped):
+                return True
+            continue
+        break
+    return False
 
 
 def discover_migrations(migrations_dir: Path) -> List[Migration]:
@@ -235,6 +304,7 @@ def discover_migrations(migrations_dir: Path) -> List[Migration]:
             Migration(
                 number=number, name=name, path=path,
                 checksum=compute_checksum(text), text=text,
+                no_transaction=_parses_no_transaction_directive(text),
             )
         )
     migrations.sort(key=lambda m: m.number)
@@ -359,13 +429,31 @@ def build_status(migrations_dir: Path, conn: Any) -> List[MigrationStatus]:
 
 
 def apply_migration(conn: Any, migration: Migration) -> None:
-    """Apply one migration file transactionally.
+    """Apply one migration file.
 
-    Every GO-separated batch is executed, then the bookkeeping row is
-    inserted, all before a single commit. Any failure rolls back the whole
-    migration — no partial DDL and no bookkeeping row survive a failed
-    migration. Uses the text read once at discovery (``migration.text``).
+    Dispatches on ``migration.no_transaction`` (see module docstring's
+    "Non-transactional migrations" section):
+
+    * Transactional (default, every migration 001-008): every GO-separated
+      batch is executed, then the bookkeeping row is inserted, all before a
+      single commit. Any failure rolls back the whole migration — no
+      partial DDL and no bookkeeping row survive a failed migration.
+    * Non-transactional (``-- migrate:no-transaction`` header directive):
+      every batch and the bookkeeping row are executed with the connection
+      in AUTOCOMMIT instead — each one commits itself immediately, and
+      THERE IS NO ROLLBACK. Required for SQL Server DDL that cannot run
+      inside a user transaction (e.g. CREATE FULLTEXT CATALOG/INDEX).
+
+    Uses the text read once at discovery (``migration.text``).
     """
+    if migration.no_transaction:
+        _apply_migration_autocommit(conn, migration)
+    else:
+        _apply_migration_transactional(conn, migration)
+
+
+def _apply_migration_transactional(conn: Any, migration: Migration) -> None:
+    """Default path: one BEGIN-implicit transaction for the whole file."""
     cursor = conn.cursor()
     try:
         for batch in split_batches(migration.text):
@@ -376,6 +464,32 @@ def apply_migration(conn: Any, migration: Migration) -> None:
         raise
     else:
         conn.commit()
+
+
+def _apply_migration_autocommit(conn: Any, migration: Migration) -> None:
+    """Non-transactional path for a ``-- migrate:no-transaction`` migration.
+
+    Flips ``conn.autocommit`` to ``True`` for the duration of this one
+    migration so each batch (and the bookkeeping INSERT) commits itself
+    immediately — required for DDL SQL Server refuses to run inside any
+    user transaction. Restores ``conn.autocommit`` to ``False`` in a
+    ``finally`` (success OR failure) so later migrations applied on this
+    same connection in the same run stay transactional by default.
+
+    NO ROLLBACK: on failure partway through, every batch executed before
+    the failing one is already permanently committed and the bookkeeping
+    row is NOT inserted (the migration stays "pending" on re-run). Safe
+    only because the migration file is required to be idempotent (IF NOT
+    EXISTS/IF EXISTS guards on every statement) — see module docstring.
+    """
+    conn.autocommit = True
+    try:
+        cursor = conn.cursor()
+        for batch in split_batches(migration.text):
+            cursor.execute(batch)
+        cursor.execute(_INSERT_APPLIED_SQL, migration.name, migration.checksum)
+    finally:
+        conn.autocommit = False
 
 
 def apply_pending(migrations_dir: Path, conn: Any) -> List[str]:
