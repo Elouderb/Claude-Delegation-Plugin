@@ -36,7 +36,13 @@ from contracts.identifiers import MEMORY, generate_ulid, new_id
 from contracts.identity import MachineIdentity, RepositoryIdentity
 from contracts.registry import AgentRegistration
 from memory_core.adapters import load_content
-from memory_core.availability import MemoryUnavailable, check_availability
+from memory_core.availability import (
+    DEFAULT_EMBEDDING_DIM,
+    DEFAULT_EMBEDDING_MODEL,
+    DEFAULT_RERANKER_MODEL,
+    MemoryUnavailable,
+    check_availability,
+)
 
 from .store import ALLOWED_STATUSES, PreparedEvent
 
@@ -69,6 +75,11 @@ _MAX_CLIENT_ID_CHARS = 64
 # at the app layer with a clean 400 rather than a driver truncation 500 (mirrors
 # the client_id guard above). Content itself is bounded by MAX_CONTENT_LENGTH.
 _MAX_SOURCE_PATH_CHARS = 1000
+
+# Upper bound on /v1/memory/query top_k (mirrors the memory_query MCP tool's
+# _MAX_TOP_K): reranking scores every pooled candidate, so an unbounded top_k is
+# an unbounded-work footgun. Rejected with a clean 400.
+_MEMORY_MAX_TOP_K = 1000
 
 # ops.sync_cursors.last_seq is a SQL BIGINT (see database/migrations/005). Reject
 # an out-of-range value (negative, or beyond BIGINT max) at the app layer with a
@@ -103,6 +114,7 @@ def create_app(
     store: Optional[Any] = None,
     memory_store: Optional[Any] = None,
     memory_embedder: Optional[Callable[[], Any]] = None,
+    memory_reranker: Optional[Callable[[], Any]] = None,
 ) -> Flask:
     """Build the Agent OS API Flask app.
 
@@ -115,13 +127,17 @@ def create_app(
     :class:`~services.api.store.SqlStore` over :func:`database.migrate.connect`;
     tests inject a :class:`~services.api.store.FakeStore`.
 
-    ``memory_store`` / ``memory_embedder`` back ``POST /v1/memory/ingest`` and are
-    injected the same way as ``store``: ``memory_store`` defaults to a
-    :class:`~services.api.memory_store.MemoryStore` over
-    :func:`database.migrate.connect`, and ``memory_embedder`` is a zero-arg factory
-    resolving the hub-side embedder (default: availability-gated bge-small). Tests
-    inject a :class:`~services.api.memory_store.FakeMemoryStore` + a deterministic
-    fake embedder factory so ingest runs with no SQL Server and no real model.
+    ``memory_store`` / ``memory_embedder`` / ``memory_reranker`` back the memory
+    endpoints (``POST /v1/memory/ingest``, ``POST /v1/memory/query``,
+    ``GET /v1/memory/status``) and are injected the same way as ``store``:
+    ``memory_store`` defaults to a :class:`~services.api.memory_store.MemoryStore`
+    over :func:`database.migrate.connect`, ``memory_embedder`` is a zero-arg factory
+    resolving the hub-side embedder (default: availability-gated bge-small), and
+    ``memory_reranker`` is a zero-arg factory resolving the cross-encoder used only
+    on ``rerank=True`` queries (default: availability-gated). Tests inject a
+    :class:`~services.api.memory_store.FakeMemoryStore` + deterministic fake
+    embedder/reranker factories so the memory endpoints run with no SQL Server and
+    no real model.
     """
     app = Flask(__name__)
     resolved_key = api_key if api_key is not None else os.environ.get(_API_KEY_ENV)
@@ -144,6 +160,8 @@ def create_app(
         memory_store = MemoryStore(migrate.connect)
     if memory_embedder is None:
         memory_embedder = _default_embedder_factory
+    if memory_reranker is None:
+        memory_reranker = _default_reranker_factory
 
     # ----------------------------------------------------------------- auth #
     @app.before_request
@@ -386,6 +404,137 @@ def create_app(
             "documents_detected": len(docs),
             **summary,
         }), 200
+
+    # -------------------------------------------------------- memory query #
+    @app.post("/v1/memory/query")
+    def query_memory():
+        """Hybrid retrieval over the central memory corpus (READ path, Slice 2).
+
+        Reproduces the local ``memory_query`` tool against SQL Server: the query is
+        embedded HUB-SIDE (availability-gated → 503), fused (vector kNN + full-text)
+        and returned. Behind ``_require_auth`` (memory is private) but NOT
+        ``_require_machine_match`` — a read endpoint has no per-machine binding.
+        The result mirrors the ``memory_query`` MCP tool shape.
+        """
+        data = request.get_json(silent=True)
+        if not isinstance(data, dict):
+            return _error(400, "invalid_payload", "expected a JSON object")
+        query = data.get("query")
+        if not isinstance(query, str) or not query.strip():
+            return _error(400, "invalid_payload", "query is required")
+
+        top_k = data.get("top_k", 8)
+        if isinstance(top_k, bool) or not isinstance(top_k, int) or not (1 <= top_k <= _MEMORY_MAX_TOP_K):
+            return _error(400, "invalid_payload", f"top_k must be an integer in 1..{_MEMORY_MAX_TOP_K}")
+        source_type = data.get("source_type")
+        if source_type is not None and not isinstance(source_type, str):
+            return _error(400, "invalid_payload", "source_type must be a string")
+        date_from = data.get("date_from")
+        if date_from is not None and not isinstance(date_from, str):
+            return _error(400, "invalid_payload", "date_from must be a string")
+        date_to = data.get("date_to")
+        if date_to is not None and not isinstance(date_to, str):
+            return _error(400, "invalid_payload", "date_to must be a string")
+        rerank = data.get("rerank", False)
+        if not isinstance(rerank, bool):
+            return _error(400, "invalid_payload", "rerank must be a boolean")
+        rerank_pool = data.get("rerank_pool")
+        if rerank_pool is not None and (
+            isinstance(rerank_pool, bool) or not isinstance(rerank_pool, int) or rerank_pool < 1
+        ):
+            return _error(400, "invalid_payload", "rerank_pool must be a positive integer")
+        # max_per_doc: ABSENT → the tool's default of 1 (dedup ON); explicit null →
+        # None (dedup OFF); otherwise a positive int. The sentinel distinguishes
+        # "not sent" from "sent as null", which mean different things here.
+        if "max_per_doc" in data:
+            max_per_doc = data.get("max_per_doc")
+            if max_per_doc is not None and (
+                isinstance(max_per_doc, bool) or not isinstance(max_per_doc, int) or max_per_doc < 1
+            ):
+                return _error(400, "invalid_payload", "max_per_doc must be a positive integer or null")
+        else:
+            max_per_doc = 1
+
+        # Availability gate: resolve the hub-side embedder to embed the query.
+        # Absent extras/model → a clean 503 (mirrors the memory_* MCP tools).
+        try:
+            embedder = memory_embedder()
+        except MemoryUnavailable:
+            return _error(503, "memory_unavailable", "memory subsystem unavailable")
+
+        # The cross-encoder is loaded ONLY for rerank=True, and is availability-
+        # gated the same way (its model download can fail independently).
+        reranker = None
+        if rerank:
+            try:
+                reranker = memory_reranker()
+            except MemoryUnavailable:
+                return _error(503, "memory_unavailable", "memory subsystem unavailable")
+
+        try:
+            results = memory_store.query(
+                query, embedder,
+                top_k=top_k, source_type=source_type,
+                date_from=date_from, date_to=date_to,
+                rerank=rerank, rerank_pool=rerank_pool,
+                max_per_doc=max_per_doc, reranker=reranker,
+            )
+        except MemoryUnavailable:
+            return _error(503, "memory_unavailable", "memory subsystem unavailable")
+        except ValueError as exc:
+            # Store-level validation (bad ISO date, unknown source_type, bad
+            # rerank_pool): the message echoes only the caller's own input / static
+            # config, never corpus text.
+            return _error(400, "invalid_payload", str(exc))
+        except Exception:
+            # Never leak internals or corpus text on an unexpected failure.
+            app.logger.exception("memory query failed")
+            return _error(500, "internal_error", "memory query failed")
+
+        return jsonify({
+            "available": True,
+            "operation": "memory_query",
+            "query": query,
+            "top_k": top_k,
+            "reranked": bool(rerank),
+            "max_per_doc": max_per_doc,
+            "count": len(results),
+            "results": results,
+        }), 200
+
+    # ------------------------------------------------------- memory status #
+    @app.get("/v1/memory/status")
+    def memory_status():
+        """Memory-subsystem status: availability + model + corpus stats.
+
+        Behind ``_require_auth``. Mirrors the ``memory_status`` MCP tool shape where
+        sensible for the hub: it reports the embedder/reranker availability that
+        gates the query path and the corpus stats from SQL Server, but omits the
+        MCP tool's local-SQLite ``db_path`` fields (the hub's storage is SQL
+        Server, whose reachability is reflected by ``corpus`` vs. ``corpus_error``).
+        Always 200 — a stats failure degrades to ``corpus_error``, never a 500.
+        """
+        availability = check_availability()
+        reranker_model = (
+            os.environ.get("AGENT_OS_MEMORY_RERANKER_MODEL", "").strip() or DEFAULT_RERANKER_MODEL
+        )
+        status: dict = {
+            "operation": "memory_status",
+            # Hub query availability is the EMBEDDER (needed to embed the query);
+            # the corpus store is SQL Server, reflected by corpus/corpus_error below.
+            "available": bool(availability.get("embedder_available")),
+            "embedder_available": bool(availability.get("embedder_available")),
+            "reranker_available": bool(availability.get("reranker_available")),
+            "embedding_model": DEFAULT_EMBEDDING_MODEL,
+            "embedding_dim": DEFAULT_EMBEDDING_DIM,
+            "reranker_model": reranker_model,
+        }
+        try:
+            status["corpus"] = memory_store.stats()
+        except Exception:
+            app.logger.exception("memory status stats failed")
+            status["corpus_error"] = "internal error; see server logs"
+        return jsonify(status), 200
 
     # ------------------------------------------------------------- reads #
     @app.get("/v1/machines")
@@ -681,6 +830,22 @@ def _default_embedder_factory() -> Any:
     from memory_core.embeddings import get_default_embedder
 
     return get_default_embedder()
+
+
+def _default_reranker_factory() -> Any:
+    """Resolve the hub-side default cross-encoder reranker, or raise MemoryUnavailable.
+
+    Used only by ``rerank=True`` queries. Availability-gated exactly like the
+    embedder (the reranker shares the sentence-transformers runtime); the model is
+    memoized by ``get_default_reranker``'s ``lru_cache``. Heavy imports stay lazy so
+    importing this module never pulls sentence-transformers/torch.
+    """
+    availability = check_availability()
+    if not availability.get("reranker_available"):
+        raise MemoryUnavailable(availability.get("hint") or "reranker unavailable")
+    from memory_core.reranker import get_default_reranker
+
+    return get_default_reranker()
 
 
 def _mint_credential() -> Tuple[str, str, str]:

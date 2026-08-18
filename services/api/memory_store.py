@@ -1,7 +1,9 @@
-"""Central-memory persistence for the Agent OS API — the hub-side ingest store.
+"""Central-memory persistence for the Agent OS API — the hub-side store.
 
-This is the SQL-Server-backed WRITE half of central memory (epic 6fead93b,
-Slice 1c). It mirrors two established patterns:
+This is the SQL-Server-backed half of central memory (epic 6fead93b): the WRITE
+path (``ingest_documents``, Slice 1c) plus the hybrid READ path (``query``, Slice
+2) that reproduces the LOCAL sqlite store's retrieval against SQL Server. It
+mirrors two established patterns:
 
 * **services/api/store.py** — the same two-implementation shape (a SQL-backed
   :class:`MemoryStore` with per-operation connection discipline, plus an
@@ -61,16 +63,37 @@ deterministic fake embedder and never touch SQL Server.
 from __future__ import annotations
 
 import json
+import math
+import re
 from dataclasses import dataclass, field
 from typing import Any, Callable, Dict, Iterable, List, Optional, Sequence
 
-from memory_core.adapters import SourceDocument
+from memory_core.adapters import VALID_SOURCE_TYPES, SourceDocument, validate_iso_date
 from memory_core.availability import DEFAULT_EMBEDDING_DIM
 from memory_core.embeddings import Embedder
+from memory_core.reranker import Reranker
+from memory_core.retrieval import RRF_K, fuse_ranked_ids
 
 # Cap the IN-list size for the scoped preload so we stay well under SQL Server's
 # parameter limit (2100); document batches are tiny in practice.
 _IN_CHUNK = 500
+
+# ---- Hybrid-retrieval pool sizing (mirrors mcp/memory/store.py verbatim) ----
+# These govern how many vector/lexical candidates to fetch and fuse; reproduced
+# here (not imported from the mcp layer) so services.api depends only on
+# memory_core, exactly like the shared classify/embed/summary primitives below.
+# The local store is the source of truth — keep these in lockstep with it.
+_MIN_CANDIDATE_POOL = 50
+_CANDIDATE_MULTIPLIER = 5
+_VEC_K_LIMIT = 4096
+_DEFAULT_RERANK_POOL = 50
+_MAX_RERANK_POOL = 1000
+_DEFAULT_DEDUP_POOL = 50
+_DEDUP_POOL_MULTIPLIER = 10
+
+# Lexical term extraction (mirrors mcp/memory/store.py._fts_query / _WORD_RE).
+_WORD_RE = re.compile(r"\w+")
+_FTS_MAX_TERMS = 32
 
 
 # --------------------------------------------------------------------------- #
@@ -209,6 +232,224 @@ def _bucket(summary: dict, doc: SourceDocument) -> None:
 def _chunked(items: List[str], size: int = _IN_CHUNK) -> Iterable[List[str]]:
     for i in range(0, len(items), size):
         yield items[i : i + size]
+
+
+# --------------------------------------------------------------------------- #
+# Shared hybrid-retrieval primitives (used by BOTH query implementations)
+#
+# These reproduce the LOCAL store's query semantics (mcp/memory/store.py
+# MemoryStore.query L578-707 and its helpers) storage-agnostically, so the SQL
+# store and its in-memory fake cannot drift on validation, pool sizing, fusion,
+# rerank ordering, per-doc dedup, or the returned row shape. Only candidate
+# GENERATION (SQL vs. Python) differs between the two implementations.
+# --------------------------------------------------------------------------- #
+def _query_terms(text: str) -> List[str]:
+    """The capped ``\\w+`` term list for the lexical arm (mirrors _fts_query)."""
+    return _WORD_RE.findall(text or "")[:_FTS_MAX_TERMS]
+
+
+def _contains_query(text: str) -> Optional[str]:
+    """Build a SQL Server CONTAINS search condition: quoted terms OR-ed for recall.
+
+    Mirrors mcp/memory/store.py._fts_query. Quoting each ``\\w+`` term neutralizes
+    CONTAINS operators/reserved characters in user input (the terms are word
+    characters only, so they can never contain a closing quote). Returns None when
+    the query has no indexable terms, so the caller skips the lexical arm exactly
+    like the local ``fts_ids = []`` path.
+    """
+    terms = _query_terms(text)
+    if not terms:
+        return None
+    return " OR ".join(f'"{t}"' for t in terms)
+
+
+def _candidate_pool(top_k: int) -> int:
+    """SQL TOP/kNN candidate pool (mirrors local _candidate_pool)."""
+    return min(max(_MIN_CANDIDATE_POOL, top_k * _CANDIDATE_MULTIPLIER), _VEC_K_LIMIT)
+
+
+def _resolve_dedup_pool(top_k: int) -> int:
+    """Fused pool for dedup backfill; SCALES with top_k (mirrors local)."""
+    return min(max(_DEFAULT_DEDUP_POOL, top_k * _DEDUP_POOL_MULTIPLIER), _VEC_K_LIMIT)
+
+
+def _resolve_rerank_pool(rerank_pool: Optional[int], top_k: int) -> int:
+    """Validate/normalize the rerank candidate-pool size (mirrors local)."""
+    if rerank_pool is None:
+        pool = _DEFAULT_RERANK_POOL
+    elif isinstance(rerank_pool, bool) or not isinstance(rerank_pool, int) or rerank_pool < 1:
+        raise ValueError(f"rerank_pool must be a positive integer, got {rerank_pool!r}")
+    elif rerank_pool > _MAX_RERANK_POOL:
+        raise ValueError(f"rerank_pool must be <= {_MAX_RERANK_POOL}, got {rerank_pool!r}")
+    else:
+        pool = rerank_pool
+    return max(pool, top_k)
+
+
+def _validate_query_args(
+    embedder: Embedder,
+    embedding_dim: int,
+    top_k: int,
+    date_from: Optional[str],
+    date_to: Optional[str],
+    source_type: Optional[str],
+    max_per_doc: Optional[int],
+) -> tuple[Optional[str], Optional[str]]:
+    """Mirror the local query's argument validation; returns normalized dates."""
+    if embedder.dim != embedding_dim:
+        raise ValueError(f"embedder dim {embedder.dim} != store dim {embedding_dim}")
+    if not isinstance(top_k, int) or isinstance(top_k, bool) or top_k < 1:
+        raise ValueError(f"top_k must be a positive integer, got {top_k!r}")
+    date_from = validate_iso_date(date_from, "date_from")
+    date_to = validate_iso_date(date_to, "date_to")
+    if source_type is not None and source_type not in VALID_SOURCE_TYPES:
+        raise ValueError(
+            f"invalid source_type {source_type!r}; expected one of {VALID_SOURCE_TYPES}"
+        )
+    if max_per_doc is not None and (
+        isinstance(max_per_doc, bool) or not isinstance(max_per_doc, int) or max_per_doc < 1
+    ):
+        raise ValueError(
+            f"max_per_doc must be a positive integer or None, got {max_per_doc!r}"
+        )
+    return date_from, date_to
+
+
+def _resolve_pool_target(
+    top_k: int,
+    rerank: bool,
+    reranker: Optional[Reranker],
+    rerank_pool: Optional[int],
+    max_per_doc: Optional[int],
+) -> int:
+    """How many fused candidates to materialize (mirrors local pool_target).
+
+    Exactly top_k without rerank OR dedup (Phase-0 behavior); a rerank pool the
+    cross-encoder reorders within; a dedup pool to backfill distinct docs; the max
+    of the two when both are on. Never below top_k.
+    """
+    pool_target = top_k
+    if rerank:
+        if reranker is None:
+            raise ValueError("rerank=True requires a reranker")
+        pool_target = max(pool_target, _resolve_rerank_pool(rerank_pool, top_k))
+    if max_per_doc is not None:
+        pool_target = max(pool_target, _resolve_dedup_pool(top_k))
+    return pool_target
+
+
+def _cosine_distance(a: Sequence[float], b: Sequence[float]) -> float:
+    """Cosine distance (1 - cosine similarity) — the fake's VECTOR_DISTANCE twin."""
+    dot = sum(x * y for x, y in zip(a, b))
+    na = math.sqrt(sum(x * x for x in a))
+    nb = math.sqrt(sum(y * y for y in b))
+    if na == 0.0 or nb == 0.0:
+        return 1.0
+    return 1.0 - dot / (na * nb)
+
+
+def _iso_or_none(value: Any) -> Optional[str]:
+    """Render a DATETIMEOFFSET (decoded to an aware datetime) as an ISO string.
+
+    Central ``memory.documents`` has no ``ingested_at`` column; ``created_at`` is
+    its equivalent and populates the local row shape's ``ingested_at`` field. The
+    local store stores that as an ISO string, so we normalize here for parity and
+    JSON-serializability.
+    """
+    if value is None:
+        return None
+    if hasattr(value, "isoformat"):
+        return value.isoformat()
+    return str(value)
+
+
+def _coerce_meta(value: Any) -> dict:
+    """Chunk meta as a dict, tolerant of a JSON string (SQL) or a dict (fake)."""
+    if isinstance(value, dict):
+        return value
+    try:
+        return json.loads(value or "{}")
+    except (TypeError, ValueError):
+        return {}
+
+
+def _result_row(row: dict, score: float) -> dict:
+    """Map a hydrated central row + fusion score to the LOCAL _result_row shape."""
+    return {
+        "chunk_id": row["chunk_id"],
+        "text": row["chunk_text"],
+        "seq": row["seq"],
+        "score": round(float(score), 6),
+        "doc_id": row["document_id"],
+        "title": row["title"],
+        "source_type": row["source_type"],
+        "published_at": row["published_at"],
+        # created_at is the central equivalent of the local store's ingested_at.
+        "ingested_at": _iso_or_none(row.get("created_at")),
+        "source_path": row["source_path"],
+        "provenance": row["provenance"],
+        "embedding_model": row["embedding_model"],
+        "meta": _coerce_meta(row.get("meta")),
+    }
+
+
+def _rerank_order(reranker: Reranker, query: str, results: List[dict]) -> List[dict]:
+    """Reorder the WHOLE fused pool by cross-encoder score (mirrors local).
+
+    Annotates every row with ``rerank_score`` (RRF ``score`` left intact); slicing
+    and dedup are the caller's single tail step, so rerank composes with dedup.
+    """
+    if not results:
+        return []
+    scores = reranker.score(query, [r["text"] for r in results])
+    if len(scores) != len(results):
+        raise ValueError(
+            f"reranker returned {len(scores)} scores for {len(results)} candidates"
+        )
+    order = sorted(range(len(results)), key=lambda i: (-scores[i], results[i]["chunk_id"]))
+    reranked: List[dict] = []
+    for i in order:
+        r = dict(results[i])
+        r["rerank_score"] = round(float(scores[i]), 6)
+        reranked.append(r)
+    return reranked
+
+
+def _dedup_by_doc(results: List[dict], max_per_doc: int, top_k: int) -> List[dict]:
+    """Keep at most ``max_per_doc`` chunks per ``doc_id``, then take ``top_k``.
+
+    Backfills freed slots with further DISTINCT docs (mirrors local _dedup_by_doc).
+    """
+    counts: Dict[str, int] = {}
+    kept: List[dict] = []
+    for row in results:
+        doc_id = row["doc_id"]
+        if counts.get(doc_id, 0) >= max_per_doc:
+            continue
+        counts[doc_id] = counts.get(doc_id, 0) + 1
+        kept.append(row)
+        if len(kept) >= top_k:
+            break
+    return kept
+
+
+def _finalize(
+    fused: Sequence[tuple],
+    rows_by_id: Dict[str, dict],
+    query: str,
+    rerank: bool,
+    reranker: Optional[Reranker],
+    max_per_doc: Optional[int],
+    top_k: int,
+) -> List[dict]:
+    """Build result rows, then rerank (optional) then dedup/slice — local order."""
+    results = [_result_row(rows_by_id[cid], score) for cid, score in fused if cid in rows_by_id]
+    if rerank:
+        assert reranker is not None  # narrowed by _resolve_pool_target; guards the checker
+        results = _rerank_order(reranker, query, results)
+    if max_per_doc is not None:
+        return _dedup_by_doc(results, max_per_doc, top_k)
+    return results[:top_k]
 
 
 # --------------------------------------------------------------------------- #
@@ -474,6 +715,170 @@ class MemoryStore:
             conn.close()
         return summary
 
+    # -- query (hybrid read path, Slice 2) --------------------------------- #
+    def _doc_filter_sql(
+        self,
+        source_type: Optional[str],
+        date_from: Optional[str],
+        date_to: Optional[str],
+    ) -> tuple[str, List[str]]:
+        """Documents-table filter fragment (alias ``d``) + its params.
+
+        Mirrors mcp/memory/store.py._doc_filter_sql. DATE-FALLBACK RECONCILIATION:
+        the local store coalesces ``published_at`` with ``ingested_at``; central
+        ``memory.documents`` has NO ``ingested_at`` column — ``created_at``
+        (DATETIMEOFFSET) is its equivalent. It is rendered to its ``YYYY-MM-DD``
+        prefix with ``CONVERT(char(10), ..., 23)`` (ISO style 23) so the
+        first-10-chars STRING comparison matches the local ``substr(...,1,10)``
+        semantics byte-for-byte (a plain lexical compare over zero-padded ISO
+        dates is chronological under any collation).
+        """
+        clauses: List[str] = []
+        params: List[str] = []
+        if source_type:
+            clauses.append("d.source_type = ?")
+            params.append(source_type)
+        date_expr = (
+            "SUBSTRING(COALESCE(NULLIF(d.published_at, N''), "
+            "CONVERT(char(10), d.created_at, 23)), 1, 10)"
+        )
+        if date_from:
+            clauses.append(f"{date_expr} >= ?")
+            params.append(date_from[:10])
+        if date_to:
+            clauses.append(f"{date_expr} <= ?")
+            params.append(date_to[:10])
+        return " AND ".join(clauses), params
+
+    def _vector_candidate_ids(
+        self, cur, query_vec: Sequence[float], pool: int, filt_sql: str, filt_params: List[str]
+    ) -> List[str]:
+        """Exact-scan vector kNN candidate chunk_ids, closest first.
+
+        NO vector index by design (migration 008 header: exact VECTOR_DISTANCE scan
+        under 50k vectors). The query vector binds via the SAME double-cast the
+        INSERT uses (card 4d362ffb): ``CAST(CAST(? AS NVARCHAR(MAX)) AS VECTOR(n))``
+        with the param = ``json.dumps(floats)`` — a realistic ~8KB vector streams as
+        SQL_WLONGVARCHAR and a single cast fails SQLSTATE 22018. Cosine distance:
+        smaller = closer, so ORDER BY ASC.
+        """
+        sql = (
+            "SELECT TOP (?) c.chunk_id, "
+            "VECTOR_DISTANCE('cosine', c.embedding, "
+            f"CAST(CAST(? AS NVARCHAR(MAX)) AS VECTOR({self.embedding_dim}))) AS distance "
+            "FROM memory.chunks c"
+        )
+        params: List[Any] = [pool, json.dumps([float(x) for x in query_vec])]
+        if filt_sql:
+            sql += (
+                " JOIN memory.documents d ON d.document_id = c.document_id WHERE " + filt_sql
+            )
+            params += filt_params
+        sql += " ORDER BY distance ASC"
+        cur.execute(sql, *params)
+        return [r["chunk_id"] for r in self._rows(cur)]
+
+    def _lexical_candidate_ids(
+        self, cur, contains_expr: str, pool: int, filt_sql: str, filt_params: List[str]
+    ) -> List[str]:
+        """Full-text CONTAINSTABLE candidate chunk_ids, most-relevant first.
+
+        CONTAINSTABLE returns ``[KEY]`` (the KEY INDEX value = ``chunk_seq_id``) and
+        ``[RANK]`` (SQL Server's proprietary relevance, not BM25 — fine, RRF fuses
+        rank POSITIONS). Join back to chunks on ``chunk_seq_id`` and ORDER BY RANK
+        DESC. Requires migration 009's full-text index to exist.
+        """
+        sql = (
+            "SELECT TOP (?) c.chunk_id "
+            "FROM CONTAINSTABLE(memory.chunks, chunk_text, ?) AS kt "
+            "JOIN memory.chunks c ON c.chunk_seq_id = kt.[KEY]"
+        )
+        params: List[Any] = [pool, contains_expr]
+        if filt_sql:
+            sql += (
+                " JOIN memory.documents d ON d.document_id = c.document_id WHERE " + filt_sql
+            )
+            params += filt_params
+        sql += " ORDER BY kt.[RANK] DESC"
+        cur.execute(sql, *params)
+        return [r["chunk_id"] for r in self._rows(cur)]
+
+    def _load_candidate_rows(self, cur, chunk_ids: Sequence[str]) -> Dict[str, dict]:
+        """Hydrate the fused chunk_ids with document metadata (batched IN-list).
+
+        Mirrors mcp/memory/store.py._load_candidate_rows; central column names
+        (chunk_text, document_id, created_at) are mapped to the local row shape by
+        :func:`_result_row`.
+        """
+        rows: Dict[str, dict] = {}
+        ids = list(chunk_ids)
+        if not ids:
+            return rows
+        for batch in _chunked(ids):
+            placeholders = ",".join("?" * len(batch))
+            cur.execute(
+                "SELECT c.chunk_id, c.chunk_text, c.seq, c.meta, c.embedding_model, "
+                "d.document_id, d.title, d.source_type, d.published_at, "
+                "d.created_at, d.source_path, d.provenance "
+                "FROM memory.chunks c JOIN memory.documents d "
+                "ON d.document_id = c.document_id "
+                f"WHERE c.chunk_id IN ({placeholders})",
+                *batch,
+            )
+            for r in self._rows(cur):
+                rows[r["chunk_id"]] = r
+        return rows
+
+    def query(
+        self,
+        query: str,
+        embedder: Embedder,
+        *,
+        top_k: int = 8,
+        source_type: Optional[str] = None,
+        date_from: Optional[str] = None,
+        date_to: Optional[str] = None,
+        rerank: bool = False,
+        rerank_pool: Optional[int] = None,
+        max_per_doc: Optional[int] = None,
+        reranker: Optional[Reranker] = None,
+    ) -> List[dict]:
+        """Hybrid vector-kNN + full-text retrieval fused with RRF (k=60).
+
+        Reproduces the LOCAL store's query semantics (mcp/memory/store.py
+        MemoryStore.query) against SQL Server: the same validation, pool sizing,
+        source_type / date filters (pushed into both candidate queries), RRF
+        fusion, optional cross-encoder rerank, and optional per-document dedup
+        (``max_per_doc``), in the same fuse → rerank → dedup order, returning the
+        same list-of-row-dicts shape. One short-lived read connection (per-op
+        cursor), mirroring the write methods' connection discipline.
+        """
+        date_from, date_to = _validate_query_args(
+            embedder, self.embedding_dim, top_k, date_from, date_to, source_type, max_per_doc
+        )
+        pool_target = _resolve_pool_target(top_k, rerank, reranker, rerank_pool, max_per_doc)
+        pool = _candidate_pool(pool_target)
+
+        query_vec = embedder.embed_query(query)
+        contains_expr = _contains_query(query)
+        filt_sql, filt_params = self._doc_filter_sql(source_type, date_from, date_to)
+
+        conn = self._connect()
+        try:
+            cur = conn.cursor()
+            vec_ids = self._vector_candidate_ids(cur, query_vec, pool, filt_sql, filt_params)
+            fts_ids: List[str] = []
+            if contains_expr:
+                fts_ids = self._lexical_candidate_ids(
+                    cur, contains_expr, pool, filt_sql, filt_params
+                )
+            fused = fuse_ranked_ids(vec_ids, fts_ids, top_k=pool_target, k=RRF_K)
+            rows_by_id = self._load_candidate_rows(cur, [cid for cid, _ in fused])
+        finally:
+            conn.close()
+
+        return _finalize(fused, rows_by_id, query, rerank, reranker, max_per_doc, top_k)
+
     # -- status ------------------------------------------------------------ #
     def stats(self) -> dict:
         """Corpus statistics: document/chunk counts by source_type + model info.
@@ -649,6 +1054,126 @@ class FakeMemoryStore:
             self._delete_document(doc.doc_id)
             summary["documents_removed"] += 1
         return summary
+
+    # -- query (hybrid read path, Slice 2) --------------------------------- #
+    def _allowed_doc_ids(
+        self,
+        source_type: Optional[str],
+        date_from: Optional[str],
+        date_to: Optional[str],
+    ) -> Optional[set]:
+        """Doc ids passing the source_type / date filters, or None (no filter).
+
+        Reproduces :meth:`MemoryStore._doc_filter_sql` semantics in Python: the
+        date compared is the first 10 chars of ``published_at`` (falling back to
+        ``created_at``), and an empty/missing date is excluded from a date-bounded
+        query — the local ``substr(COALESCE(...), 1, 10)`` behavior.
+        """
+        if not source_type and not date_from and not date_to:
+            return None
+        allowed: set = set()
+        for did, doc in self.documents.items():
+            if source_type and doc.get("source_type") != source_type:
+                continue
+            date_val = doc.get("published_at") or ""
+            if not date_val:
+                date_val = _iso_or_none(doc.get("created_at")) or ""
+            prefix = date_val[:10]
+            if date_from and not (prefix and prefix >= date_from[:10]):
+                continue
+            if date_to and not (prefix and prefix <= date_to[:10]):
+                continue
+            allowed.add(did)
+        return allowed
+
+    def _fake_vector_ids(
+        self, query_vec: Sequence[float], pool: int, allowed: Optional[set]
+    ) -> List[str]:
+        """Real cosine-distance kNN over the in-memory vectors, closest first."""
+        scored = []
+        for cid, vec in self.vectors.items():
+            chunk = self.chunks.get(cid)
+            if chunk is None:
+                continue
+            if allowed is not None and chunk["document_id"] not in allowed:
+                continue
+            scored.append((_cosine_distance(query_vec, vec), cid))
+        # distance ASC, deterministic chunk_id tie-break (SQL leaves ties unordered).
+        scored.sort(key=lambda t: (t[0], t[1]))
+        return [cid for _, cid in scored[:pool]]
+
+    def _fake_lexical_ids(
+        self, terms: Sequence[str], pool: int, allowed: Optional[set]
+    ) -> List[str]:
+        """Naive case-insensitive substring lexical match, most matches first."""
+        hits = []
+        for cid, chunk in self.chunks.items():
+            if allowed is not None and chunk["document_id"] not in allowed:
+                continue
+            text = (chunk.get("chunk_text") or "").lower()
+            score = sum(1 for t in terms if t in text)
+            if score > 0:
+                hits.append((score, cid))
+        # more matches first, deterministic chunk_id tie-break.
+        hits.sort(key=lambda t: (-t[0], t[1]))
+        return [cid for _, cid in hits[:pool]]
+
+    def _fake_hydrate(self, chunk_ids: Sequence[str]) -> Dict[str, dict]:
+        """Assemble central-column-shaped rows so _result_row consumes them as-is."""
+        rows: Dict[str, dict] = {}
+        for cid in chunk_ids:
+            chunk = self.chunks.get(cid)
+            if chunk is None:
+                continue
+            doc = self.documents.get(chunk["document_id"], {})
+            rows[cid] = {
+                "chunk_id": chunk["chunk_id"],
+                "chunk_text": chunk.get("chunk_text"),
+                "seq": chunk.get("seq"),
+                "meta": chunk.get("meta"),
+                "embedding_model": chunk.get("embedding_model"),
+                "document_id": chunk["document_id"],
+                "title": doc.get("title"),
+                "source_type": doc.get("source_type"),
+                "published_at": doc.get("published_at"),
+                "created_at": doc.get("created_at"),
+                "source_path": doc.get("source_path"),
+                "provenance": doc.get("provenance"),
+            }
+        return rows
+
+    def query(
+        self,
+        query: str,
+        embedder: Embedder,
+        *,
+        top_k: int = 8,
+        source_type: Optional[str] = None,
+        date_from: Optional[str] = None,
+        date_to: Optional[str] = None,
+        rerank: bool = False,
+        rerank_pool: Optional[int] = None,
+        max_per_doc: Optional[int] = None,
+        reranker: Optional[Reranker] = None,
+    ) -> List[dict]:
+        """In-memory parity of :meth:`MemoryStore.query` — real cosine + substring
+        lexical, the SAME validation / pool sizing / fusion / finalize path, so the
+        endpoint tests exercise the full read path with NO SQL Server."""
+        date_from, date_to = _validate_query_args(
+            embedder, self.embedding_dim, top_k, date_from, date_to, source_type, max_per_doc
+        )
+        pool_target = _resolve_pool_target(top_k, rerank, reranker, rerank_pool, max_per_doc)
+        pool = _candidate_pool(pool_target)
+
+        query_vec = embedder.embed_query(query)
+        allowed = self._allowed_doc_ids(source_type, date_from, date_to)
+        vec_ids = self._fake_vector_ids(query_vec, pool, allowed)
+        terms = [t.lower() for t in _query_terms(query)]
+        fts_ids = self._fake_lexical_ids(terms, pool, allowed) if terms else []
+
+        fused = fuse_ranked_ids(vec_ids, fts_ids, top_k=pool_target, k=RRF_K)
+        rows_by_id = self._fake_hydrate([cid for cid, _ in fused])
+        return _finalize(fused, rows_by_id, query, rerank, reranker, max_per_doc, top_k)
 
     def stats(self) -> dict:
         by_source_type: Dict[str, dict] = {}
