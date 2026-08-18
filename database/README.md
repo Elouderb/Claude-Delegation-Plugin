@@ -48,12 +48,51 @@ Numbered `database/migrations/NNN_description.sql` files, applied in order:
 - `005_sync_cursors_seq.sql` — `ops.sync_cursors.last_seq` (`BIGINT NULL`), the
   numeric replay position `GET/PUT /v1/sync/{client_id}` (card `93baf05b`)
   reads/writes. See the design notes below.
+- `006_central_tasks.sql` — `registry.tasks`, the central down-projection read
+  model for a repository-local card (Phase 2a, card `ffcaf548`). No FK back to
+  `registry.repositories`, mirroring `ops.events`'s rationale. See the design
+  notes below.
+- `007_machine_credentials.sql` — `registry.machine_credentials`: per-machine
+  API keys for the central `/v1` API (card `8737706e`). Only a SHA-256 hash of
+  each key's secret half is ever stored; revocation is a soft delete
+  (`revoked_at`) so a `key_id` can never be re-minted.
+- `008_memory_schema.sql` — the `memory` schema plus `memory.documents` /
+  `memory.chunks`, the central RAG corpus (epic `6fead93b`, card `c8e686a9`).
+  Tables + indexes only — the full-text catalog/index originally drafted here
+  had to be DEFERRED (see `009` below) after a live apply failed: SQL Server
+  refuses `CREATE FULLTEXT CATALOG` inside a user transaction, and every
+  migration up to this point (this file included) ran inside one.
+- `009_memory_fulltext.sql` — `memory_ft_catalog` + a full-text index on
+  `memory.chunks(chunk_text)` (`KEY INDEX PK_memory_chunks`,
+  `WITH CHANGE_TRACKING AUTO`), backing the lexical half of Slice 2 hybrid
+  retrieval (card `eb45271b`). The FIRST migration to use the
+  `-- migrate:no-transaction` opt-out described next — required because
+  `CREATE FULLTEXT CATALOG`/`CREATE FULLTEXT INDEX` cannot run inside a user
+  transaction at all.
 
-Each migration is applied **transactionally** (all its batches + the
-bookkeeping row, or nothing) and **checksummed** (sha256 of the file text) so
-editing an already-applied migration is detected — `apply_pending()` refuses
-to proceed rather than silently re-applying or ignoring the drift. Re-running
-against an up-to-date database is a no-op.
+Each migration is applied **transactionally by default** (all its batches +
+the bookkeeping row, or nothing) and **checksummed** (sha256 of the file
+text) so editing an already-applied migration is detected —
+`apply_pending()` refuses to proceed rather than silently re-applying or
+ignoring the drift. Re-running against an up-to-date database is a no-op.
+
+**Opting out of the transaction wrapper.** Some SQL Server DDL (`CREATE
+FULLTEXT CATALOG`/`CREATE FULLTEXT INDEX`, `CREATE DATABASE`, `ALTER
+DATABASE ... SET`, backup/restore, ...) cannot run inside a user transaction
+at all — SQL Server raises error 574 (SQLSTATE 42000) if you try, which is
+exactly what forced `009`'s full-text objects out of `008` (see above). A
+migration file opts out with a `-- migrate:no-transaction` header directive —
+a standalone comment line matching that exact text anywhere in the file's
+leading header (blank lines, `--` comments, and `GO` separators before the
+first real SQL statement; not required to be literally line 1). Such a
+migration runs every batch, and the bookkeeping row, with the connection in
+**autocommit** instead: each statement commits itself immediately, and
+**there is no rollback**. A partial failure leaves every batch executed
+before it permanently applied and the migration itself unrecorded (still
+"pending" — safe to re-run). Every no-transaction migration must therefore be
+written **idempotently** (an `IF NOT EXISTS`/`IF EXISTS` guard on every
+statement), as `009` is. Migrations `001`-`008` carry no directive and are
+fully transactional, unaffected by this option.
 
 ### Runner bookkeeping (`ops.schema_migrations`)
 
@@ -142,7 +181,8 @@ migration reports "pending").
 
 ## Files
 
-- `migrate.py` — the runner (discovery, checksumming, transactional apply,
+- `migrate.py` — the runner (discovery, checksumming, transactional-by-default
+  apply with a per-file `-- migrate:no-transaction` autocommit opt-out,
   status/dry-run, CLI).
 - `events.py` — minimal `EventEnvelope` <-> `ops.events` row mapping (used by the
   live verification test, not a real ingestion API — that's later). Provides

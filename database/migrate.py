@@ -51,7 +51,11 @@ be written idempotently (an ``IF NOT EXISTS``/``IF EXISTS`` guard on every
 statement) so re-running it after a partial failure — or after it already
 fully applied — is always safe. This is enforced by author/reviewer
 discipline, not by this module. All migrations 001-008 are transactional
-(the default) and are unaffected by this option.
+(the default) and are unaffected by this option. Before flipping into
+autocommit, this path also explicitly commits whatever transaction state
+the connection already carries (e.g. ``apply_pending()``'s preceding
+``get_applied()`` read) rather than relying on the driver to sweep it up
+implicitly — see :func:`_apply_migration_autocommit`.
 
 Design decisions (documented per the card's "your call, document it"):
 
@@ -252,19 +256,26 @@ def _parses_no_transaction_directive(text: str) -> bool:
 
     The directive is a standalone comment line ``-- migrate:no-transaction``
     ANYWHERE within the migration's leading header — the contiguous run of
-    blank and ``--``-comment lines at the top of the file, before the first
-    real SQL statement — rather than forced onto literal line 1. This
-    matches how migrations in this repo are actually written: every one
-    opens with a long structured comment block (rationale, batch layout,
-    conventions — see 008's header), and the directive naturally belongs
-    alongside that "why". Scanning stops at the first non-blank,
-    non-comment line, so an incidental occurrence of this exact text deep
-    inside a DDL batch (e.g. a string literal) is never misread as the
-    directive.
+    blank lines, ``--``-comment lines, AND standalone ``GO`` batch-separator
+    lines at the top of the file, before the first real SQL statement —
+    rather than forced onto literal line 1. This matches how migrations in
+    this repo are actually written: every one opens with a long structured
+    comment block (rationale, batch layout, conventions — see 008's
+    header), and the directive naturally belongs alongside that "why".
+    Standalone ``GO`` lines are skipped rather than treated as the "first
+    real SQL statement" that ends the scan — they're a sqlcmd/SSMS batch
+    separator (see :data:`_GO_SEPARATOR_RE`, the same regex :func:`split_batches`
+    uses), not SQL, so a header that happens to have one before the
+    directive (however unusual) must not blind this scan to it. Scanning
+    stops at the first non-blank, non-comment, non-GO-separator line, so an
+    incidental occurrence of this exact text deep inside a DDL batch (e.g.
+    a string literal) is never misread as the directive.
     """
     for line in text.splitlines():
         stripped = line.strip()
         if not stripped:
+            continue
+        if _GO_SEPARATOR_RE.match(stripped):
             continue
         if stripped.startswith("--"):
             if _NO_TRANSACTION_DIRECTIVE_RE.match(stripped):
@@ -469,12 +480,32 @@ def _apply_migration_transactional(conn: Any, migration: Migration) -> None:
 def _apply_migration_autocommit(conn: Any, migration: Migration) -> None:
     """Non-transactional path for a ``-- migrate:no-transaction`` migration.
 
-    Flips ``conn.autocommit`` to ``True`` for the duration of this one
-    migration so each batch (and the bookkeeping INSERT) commits itself
-    immediately — required for DDL SQL Server refuses to run inside any
-    user transaction. Restores ``conn.autocommit`` to ``False`` in a
-    ``finally`` (success OR failure) so later migrations applied on this
-    same connection in the same run stay transactional by default.
+    Before flipping into autocommit, explicitly ``conn.commit()`` whatever
+    transaction state the connection is already in. On the real
+    ``apply_pending()`` path this matters even when nothing has failed: it
+    runs ``get_applied()`` (a bare ``SELECT``, no commit) immediately before
+    the apply loop, which leaves an uncommitted read transaction open on a
+    manual-commit (``autocommit=False``) connection — and if THIS migration
+    is next (or first) in that loop, ``conn.autocommit = True`` would
+    otherwise be flipped with that read transaction still pending. Rather
+    than depend on pyodbc/the ODBC driver implicitly sweeping that up as
+    part of the autocommit-mode transition (an implementation detail this
+    module does not want to depend on), it is closed out explicitly and
+    deterministically first. A plain commit is correct here regardless of
+    whether anything is actually pending — it is a no-op on a connection
+    with no open transaction, and there is nothing to roll back (the only
+    thing that could be pending at this point is a prior read, never an
+    uncommitted write: every transactional migration before this one
+    already committed or rolled back itself). This fix is intentionally
+    local to this function; :func:`get_applied` and the transactional path
+    (:func:`_apply_migration_transactional`) are unchanged.
+
+    Then ``conn.autocommit`` is flipped to ``True`` for the duration of
+    this one migration so each batch (and the bookkeeping INSERT) commits
+    itself immediately — required for DDL SQL Server refuses to run inside
+    any user transaction. It is restored to ``False`` in a ``finally``
+    (success OR failure) so later migrations applied on this same
+    connection in the same run stay transactional by default.
 
     NO ROLLBACK: on failure partway through, every batch executed before
     the failing one is already permanently committed and the bookkeeping
@@ -482,6 +513,7 @@ def _apply_migration_autocommit(conn: Any, migration: Migration) -> None:
     only because the migration file is required to be idempotent (IF NOT
     EXISTS/IF EXISTS guards on every statement) — see module docstring.
     """
+    conn.commit()
     conn.autocommit = True
     try:
         cursor = conn.cursor()
