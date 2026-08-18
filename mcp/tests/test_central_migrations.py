@@ -44,6 +44,19 @@ class _FakeState:
         self.fail_batches: Set[str] = set()
         self.commits = 0
         self.rollbacks = 0
+        # Non-transactional (autocommit) migration support (card eb45271b).
+        self.autocommit = False
+        # Parallel to batches_executed: conn.autocommit at the moment each
+        # migration-file batch executed.
+        self.autocommit_at_batch: List[bool] = []
+        # One entry per _INSERT_APPLIED_SQL execution, in order: conn.autocommit
+        # at the moment the bookkeeping row was inserted.
+        self.insert_applied_autocommit: List[bool] = []
+        # Parallel to the commits counter: conn.autocommit at the moment each
+        # commit() call happened, in order -- lets a test prove a commit()
+        # ran BEFORE the autocommit=True flip (deterministic dangling-read
+        # cleanup in _apply_migration_autocommit), not after.
+        self.commit_autocommit_at: List[bool] = []
 
 
 class _FakeCursor:
@@ -83,12 +96,14 @@ class _FakeCursor:
             self.state.applied[name] = {
                 "name": name, "checksum": checksum, "applied_at": "fake-timestamp",
             }
+            self.state.insert_applied_autocommit.append(self.state.autocommit)
             self._rows = []
         else:
             batch = sql.strip()
             if batch in self.state.fail_batches:
                 raise RuntimeError(f"simulated failure executing batch: {batch[:40]!r}")
             self.state.batches_executed.append(batch)
+            self.state.autocommit_at_batch.append(self.state.autocommit)
             self._rows = []
         return self
 
@@ -100,16 +115,32 @@ class _FakeCursor:
 
 
 class _FakeConnection:
-    """Mimics a pyodbc connection; tracks commit()/rollback() calls."""
+    """Mimics a pyodbc connection; tracks commit()/rollback() calls.
+
+    ``autocommit`` is a real pyodbc.Connection attribute that migrate.py's
+    non-transactional path toggles directly (``conn.autocommit = True`` /
+    ``= False``, see database.migrate._apply_migration_autocommit) — modeled
+    here as a property proxying to ``self.state.autocommit`` so a cursor
+    created from this connection observes the same value.
+    """
 
     def __init__(self, state: Optional[_FakeState] = None) -> None:
         self.state = state or _FakeState()
+
+    @property
+    def autocommit(self) -> bool:
+        return self.state.autocommit
+
+    @autocommit.setter
+    def autocommit(self, value: bool) -> None:
+        self.state.autocommit = value
 
     def cursor(self) -> _FakeCursor:
         return _FakeCursor(self.state)
 
     def commit(self) -> None:
         self.state.commits += 1
+        self.state.commit_autocommit_at.append(self.state.autocommit)
 
     def rollback(self) -> None:
         self.state.rollbacks += 1
@@ -238,6 +269,93 @@ class TestDiscoverMigrations(unittest.TestCase):
         self.assertEqual(numbers, list(range(1, len(migrations) + 1)))
         # Every known migration is still present, in its original order.
         self.assertEqual(names[: len(known_names)], known_names)
+
+
+# ---------------------------------------------------------------------------
+# _parses_no_transaction_directive (card eb45271b)
+# ---------------------------------------------------------------------------
+
+
+class TestNoTransactionDirective(unittest.TestCase):
+    def test_absent_by_default(self):
+        text = "-- Migration 1: alpha\nCREATE TABLE alpha (id INT);"
+        self.assertFalse(migrate._parses_no_transaction_directive(text))
+
+    def test_detected_on_first_line(self):
+        text = "-- migrate:no-transaction\nCREATE FULLTEXT CATALOG c;"
+        self.assertTrue(migrate._parses_no_transaction_directive(text))
+
+    def test_detected_anywhere_in_leading_header_block(self):
+        # Migrations in this repo open with long structured rationale
+        # headers (see 008) -- the directive must be found wherever it sits
+        # in that header, not just on line 1.
+        text = (
+            "-- Migration 009: memory full-text\n"
+            "-- (long rationale header, several lines)\n"
+            "--\n"
+            "-- migrate:no-transaction\n"
+            "--\n"
+            "-- more rationale below\n"
+            "CREATE FULLTEXT CATALOG memory_ft_catalog;\n"
+        )
+        self.assertTrue(migrate._parses_no_transaction_directive(text))
+
+    def test_case_insensitive_and_whitespace_tolerant(self):
+        text = "--   MIGRATE:NO-TRANSACTION   \nCREATE TABLE t (id INT);"
+        self.assertTrue(migrate._parses_no_transaction_directive(text))
+
+    def test_blank_lines_in_header_are_skipped(self):
+        text = "-- Migration: alpha\n\n\n-- migrate:no-transaction\n\nCREATE TABLE t (id INT);"
+        self.assertTrue(migrate._parses_no_transaction_directive(text))
+
+    def test_not_detected_after_first_sql_statement(self):
+        # Only the leading header counts; a comment (or string literal
+        # containing this exact text) after real SQL has started must not
+        # retroactively flip the migration non-transactional.
+        text = (
+            "-- Migration: alpha\n"
+            "CREATE TABLE alpha (id INT);\n"
+            "-- migrate:no-transaction\n"
+        )
+        self.assertFalse(migrate._parses_no_transaction_directive(text))
+
+    def test_similar_but_not_exact_text_not_matched(self):
+        text = "-- migrate:no-transaction-ish\nCREATE TABLE t (id INT);"
+        self.assertFalse(migrate._parses_no_transaction_directive(text))
+
+    def test_leading_go_line_does_not_end_the_header_scan(self):
+        # A standalone "GO" line is not a comment or blank line, so a naive
+        # scan would treat it as "the first real SQL statement" and stop --
+        # wrongly missing a directive that follows it. GO is a batch
+        # separator, not SQL; the scan must skip it like it skips blanks and
+        # comments.
+        text = "GO\n-- migrate:no-transaction\nCREATE FULLTEXT CATALOG c;"
+        self.assertTrue(migrate._parses_no_transaction_directive(text))
+
+    def test_go_line_interleaved_with_header_comments(self):
+        text = (
+            "-- Migration: alpha\n"
+            "go\n"
+            "--\n"
+            "-- migrate:no-transaction\n"
+            "CREATE FULLTEXT CATALOG c;\n"
+        )
+        self.assertTrue(migrate._parses_no_transaction_directive(text))
+
+
+class TestDiscoverMigrationsNoTransaction(unittest.TestCase):
+    def test_flag_parsed_per_file_and_defaults_false(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            tmpdir = Path(tmp)
+            _write(tmpdir, "1_alpha.sql", "CREATE TABLE alpha (id INT);")
+            _write(
+                tmpdir, "2_beta.sql",
+                "-- migrate:no-transaction\nCREATE FULLTEXT CATALOG c;",
+            )
+            migrations = migrate.discover_migrations(tmpdir)
+            by_name = {m.name: m for m in migrations}
+            self.assertFalse(by_name["1_alpha"].no_transaction)
+            self.assertTrue(by_name["2_beta"].no_transaction)
 
 
 # ---------------------------------------------------------------------------
@@ -431,6 +549,230 @@ class TestApplyPending(unittest.TestCase):
             self.assertIn("1_alpha", conn.state.applied)
             self.assertNotIn("2_beta", conn.state.applied)
             self.assertEqual(conn.state.rollbacks, 1)
+
+
+# ---------------------------------------------------------------------------
+# apply_migration: non-transactional (autocommit) path (card eb45271b)
+# ---------------------------------------------------------------------------
+
+
+class TestApplyMigrationAutocommit(unittest.TestCase):
+    def test_no_transaction_migration_runs_in_autocommit_and_records(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            tmpdir = Path(tmp)
+            _write(
+                tmpdir, "1_fulltext.sql",
+                "-- migrate:no-transaction\n"
+                "CREATE FULLTEXT CATALOG memory_ft_catalog;\n"
+                "GO\n"
+                "CREATE FULLTEXT INDEX ON memory.chunks(chunk_text);\n",
+            )
+            conn = _FakeConnection()
+
+            applied_now = migrate.apply_pending(tmpdir, conn)
+
+            self.assertEqual(applied_now, ["1_fulltext"])
+            self.assertIn("1_fulltext", conn.state.applied)
+            # Every migration-file batch executed while autocommit was True.
+            self.assertEqual(conn.state.autocommit_at_batch, [True, True])
+            # ...and so did the bookkeeping INSERT.
+            self.assertEqual(conn.state.insert_applied_autocommit, [True])
+            # autocommit is restored to the connection default afterward.
+            self.assertFalse(conn.autocommit)
+
+    def test_no_transaction_migration_issues_exactly_one_pre_flip_commit(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            tmpdir = Path(tmp)
+            _write(
+                tmpdir, "1_fulltext.sql",
+                "-- migrate:no-transaction\nCREATE FULLTEXT CATALOG c;",
+            )
+            conn = _FakeConnection()
+
+            migrate.apply_pending(tmpdir, conn)
+
+            # ensure_bootstrap's own commit, plus _apply_migration_autocommit's
+            # explicit pre-flip commit (clears apply_pending()'s preceding
+            # get_applied() read deterministically -- see that function's
+            # docstring). No OTHER commit()/rollback() call: every DDL batch
+            # and the bookkeeping INSERT commit themselves via autocommit,
+            # not via an explicit conn.commit().
+            self.assertEqual(conn.state.commits, 2)
+            self.assertEqual(conn.state.rollbacks, 0)
+
+    def test_pending_read_before_autocommit_migration_handled_deterministically(self):
+        """apply_pending() calls get_applied() (a bare, uncommitted SELECT)
+        immediately before the apply loop. When a no-transaction migration
+        is next, _apply_migration_autocommit must close that out with an
+        explicit commit() BEFORE flipping conn.autocommit -- not rely on the
+        driver to sweep it up as a side effect of the mode change. Assert
+        the ordering directly: every commit() this run made happened while
+        conn.autocommit was still False, i.e. strictly before any batch (all
+        of which ran with autocommit True) executed."""
+        with tempfile.TemporaryDirectory() as tmp:
+            tmpdir = Path(tmp)
+            _write(
+                tmpdir, "1_fulltext.sql",
+                "-- migrate:no-transaction\nCREATE FULLTEXT CATALOG c;",
+            )
+            conn = _FakeConnection()
+
+            migrate.apply_pending(tmpdir, conn)
+
+            # Both commits (bootstrap's, and the pre-flip cleanup commit)
+            # happened while autocommit was still False -- i.e. before the
+            # migration flipped into autocommit, never after.
+            self.assertEqual(conn.state.commit_autocommit_at, [False, False])
+            self.assertEqual(conn.state.autocommit_at_batch, [True])
+            self.assertEqual(conn.state.insert_applied_autocommit, [True])
+            self.assertFalse(conn.autocommit)
+
+    def test_no_transaction_failure_restores_autocommit_and_does_not_record(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            tmpdir = Path(tmp)
+            _write(
+                tmpdir, "1_fulltext.sql",
+                "-- migrate:no-transaction\n"
+                "CREATE FULLTEXT CATALOG c;\n"
+                "GO\n"
+                "CREATE FULLTEXT INDEX ON memory.chunks(chunk_text);\n",
+            )
+            conn = _FakeConnection()
+            conn.state.fail_batches.add(
+                "CREATE FULLTEXT INDEX ON memory.chunks(chunk_text);"
+            )
+
+            with self.assertRaises(RuntimeError):
+                migrate.apply_pending(tmpdir, conn)
+
+            # First batch (the catalog -- the leading directive comment has
+            # no GO before it, so it's part of the same batch as the
+            # statement) is permanently applied -- there is NO rollback on
+            # this path, by design (see module docstring).
+            self.assertTrue(
+                any("CREATE FULLTEXT CATALOG c;" in b for b in conn.state.batches_executed)
+            )
+            self.assertNotIn("1_fulltext", conn.state.applied)
+            self.assertEqual(conn.state.rollbacks, 0)
+            # autocommit is restored even though the migration failed.
+            self.assertFalse(conn.autocommit)
+
+    def test_transactional_migration_unaffected_regression(self):
+        """A migration with no directive (every 001-008-style file) keeps
+        committing once, never touches autocommit, and rolls back on
+        failure exactly as before this card's change."""
+        with tempfile.TemporaryDirectory() as tmp:
+            tmpdir = Path(tmp)
+            _write(tmpdir, "1_alpha.sql", "CREATE TABLE alpha (id INT);")
+            conn = _FakeConnection()
+
+            migrate.apply_pending(tmpdir, conn)
+
+            self.assertFalse(conn.autocommit)
+            self.assertEqual(conn.state.autocommit_at_batch, [False])
+            self.assertEqual(conn.state.insert_applied_autocommit, [False])
+            # One commit for bootstrap + one for the migration (unchanged
+            # from TestApplyPending.test_applies_in_numeric_order_and_records_each).
+            self.assertEqual(conn.state.commits, 2)
+            self.assertEqual(conn.state.rollbacks, 0)
+
+
+# ---------------------------------------------------------------------------
+# Mixed transactional / autocommit sequencing on ONE connection (card
+# eb45271b review follow-up): the real first live apply is exactly this
+# shape -- 001-008 (transactional) then 009 (autocommit) on one connection.
+# ---------------------------------------------------------------------------
+
+
+class TestMixedTransactionalAutocommitSequencing(unittest.TestCase):
+    def test_transactional_then_autocommit_then_transactional_all_apply(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            tmpdir = Path(tmp)
+            _write(tmpdir, "1_alpha.sql", "CREATE TABLE alpha (id INT);")
+            _write(
+                tmpdir, "2_fulltext.sql",
+                "-- migrate:no-transaction\nCREATE FULLTEXT CATALOG c;",
+            )
+            _write(tmpdir, "3_gamma.sql", "CREATE TABLE gamma (id INT);")
+            conn = _FakeConnection()
+
+            applied_now = migrate.apply_pending(tmpdir, conn)
+
+            self.assertEqual(applied_now, ["1_alpha", "2_fulltext", "3_gamma"])
+            self.assertEqual(
+                set(conn.state.applied), {"1_alpha", "2_fulltext", "3_gamma"}
+            )
+            # The transactional migrations ran with autocommit False, the
+            # middle one with it True -- proving the flip is scoped to
+            # exactly the one no-transaction migration, not sticky.
+            self.assertEqual(
+                conn.state.autocommit_at_batch, [False, True, False]
+            )
+            # Connection ends transactional (default) regardless of the
+            # no-transaction migration having run in the middle.
+            self.assertFalse(conn.autocommit)
+
+    def test_failure_in_trailing_transactional_migration_still_rolls_back(self):
+        """1 (transactional) -> 2 (no-transaction) -> 3 (transactional,
+        FAILS) on ONE connection: proves the autocommit -> transactional
+        transition after migration 2 restores real rollback behavior for
+        migration 3 -- its bookkeeping row must be absent, while 1 and 2
+        (already committed/autocommitted before 3 even started) remain
+        applied and are NOT undone by 3's rollback."""
+        with tempfile.TemporaryDirectory() as tmp:
+            tmpdir = Path(tmp)
+            _write(tmpdir, "1_alpha.sql", "CREATE TABLE alpha (id INT);")
+            _write(
+                tmpdir, "2_fulltext.sql",
+                "-- migrate:no-transaction\nCREATE FULLTEXT CATALOG c;",
+            )
+            _write(tmpdir, "3_gamma.sql", "CREATE TABLE gamma (id INT);")
+            conn = _FakeConnection()
+            conn.state.fail_batches.add("CREATE TABLE gamma (id INT);")
+
+            with self.assertRaises(RuntimeError):
+                migrate.apply_pending(tmpdir, conn)
+
+            self.assertEqual(set(conn.state.applied), {"1_alpha", "2_fulltext"})
+            self.assertNotIn("3_gamma", conn.state.applied)
+            # Exactly one rollback -- migration 3's, restored correctly by
+            # the autocommit(2) -> transactional(3) transition. Migration 1
+            # (transactional) and migration 2 (autocommit) are untouched by
+            # it: no rollback -- them being applied already is irreversible
+            # by design for 2, and simply not implicated for 1.
+            self.assertEqual(conn.state.rollbacks, 1)
+            # autocommit correctly restored to False before 3 ran, and
+            # remains False after 3's failure.
+            self.assertFalse(conn.autocommit)
+
+
+# ---------------------------------------------------------------------------
+# Real migration 009 (memory full-text catalog + index, card eb45271b)
+# ---------------------------------------------------------------------------
+
+
+class TestRealMigration009(unittest.TestCase):
+    def test_discovered_as_no_transaction_and_ninth_in_contiguous_order(self):
+        migrations = migrate.discover_migrations(REAL_MIGRATIONS_DIR)
+        numbers = [m.number for m in migrations]
+        self.assertEqual(numbers, list(range(1, len(migrations) + 1)))
+        self.assertEqual(migrations[-1].number, 9)
+        self.assertEqual(migrations[-1].name, "009_memory_fulltext")
+        self.assertTrue(migrations[-1].no_transaction)
+
+    def test_split_batches_yields_two_idempotent_guarded_batches(self):
+        migration = next(
+            m for m in migrate.discover_migrations(REAL_MIGRATIONS_DIR)
+            if m.number == 9
+        )
+        batches = migrate.split_batches(migration.text)
+        self.assertEqual(len(batches), 2)
+        self.assertIn("CREATE FULLTEXT CATALOG", batches[0])
+        self.assertIn("IF NOT EXISTS", batches[0])
+        self.assertIn("CREATE FULLTEXT INDEX", batches[1])
+        self.assertIn("IF NOT EXISTS", batches[1])
+        self.assertIn("PK_memory_chunks", batches[1])
+        self.assertIn("CHANGE_TRACKING AUTO", batches[1])
 
 
 if __name__ == "__main__":
