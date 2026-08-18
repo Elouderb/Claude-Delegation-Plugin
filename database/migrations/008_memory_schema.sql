@@ -16,13 +16,44 @@
 --     App-layer INSERT marshaling uses a single CAST(? AS VECTOR(384))
 --     (verified against ODBC Driver 17, no double-cast needed); read-back
 --     via CAST(embedding AS VARCHAR(MAX)) -> JSON array string.
---   * Full-Text Search is installed (IsFullTextInstalled = 1, 59 languages).
+--   * Full-Text Search is installed (IsFullTextInstalled = 1, 59 languages)
+--     — see the DEFERRED note below; this fact is still true, just not
+--     actioned in THIS migration.
 --   * NO vector index: on-prem the DiskANN vector index is preview AND
 --     makes the table read-only, which is incompatible with an
 --     ingest-growing corpus; Microsoft recommends exact search under 50k
 --     vectors and the corpus is ~23k chunks. Retrieval therefore uses an
 --     exact VECTOR_DISTANCE table scan (Slice 2 application code, not
 --     schema) — this migration deliberately creates NO vector index.
+--
+-- ----------------------------------------------------------------------
+-- DEFERRED: full-text catalog + index (Phase 1 amendment, live-apply
+-- failure)
+-- ----------------------------------------------------------------------
+-- This migration originally (author-time) included a third batch creating
+-- CREATE FULLTEXT CATALOG memory_ft_catalog + CREATE FULLTEXT INDEX ON
+-- memory.chunks(chunk_text) ... WITH CHANGE_TRACKING AUTO. A live apply
+-- attempt against 10.42.0.249 FAILED:
+--   pyodbc.ProgrammingError ('42000', ...CREATE FULLTEXT CATALOG statement
+--   cannot be used inside a user transaction. (574))
+-- ROOT CAUSE: database/migrate.py's apply_migration() runs every batch of a
+-- migration file inside ONE user transaction (autocommit off, single commit
+-- at the end, rollback on any failure) — but SQL Server's CREATE FULLTEXT
+-- CATALOG and CREATE FULLTEXT INDEX are DDL operations that cannot run
+-- inside a user transaction at all; they require autocommit. This is
+-- fundamentally incompatible with migrate.py's current transactional model,
+-- not a batch-ordering problem GO could fix. The failed apply rolled back
+-- cleanly (verified: no memory schema/tables/catalog exist on the live DB;
+-- 008 was never recorded in ops.schema_migrations), so amending this file
+-- in place — rather than shipping a corrective follow-up migration — is
+-- safe.
+-- The full-text catalog + index are therefore DEFERRED to a future
+-- migration 009 that will need migrate.py to gain NON-TRANSACTIONAL
+-- migration support (tracked separately; a card will be created by the
+-- lead). This is acceptable to defer: memory.documents + memory.chunks
+-- (this migration) are everything the ingest write-path and the one-time
+-- local-corpus ETL need; full-text (the lexical half of hybrid retrieval)
+-- is only required later, by the Slice 2 QUERY path.
 --
 -- ----------------------------------------------------------------------
 -- Batch model (read database/migrate.py before editing this file)
@@ -34,7 +65,11 @@
 -- every batch AND the ops.schema_migrations bookkeeping INSERT succeed, and
 -- rolls back the whole file on any failure. pyodbc itself never sees a
 -- literal "GO" (that token is a sqlcmd/SSMS-only separator); the runner
--- strips it before executing. This file uses THREE GO-delimited batches:
+-- strips it before executing. This entire file therefore runs inside ONE
+-- transaction, which is exactly why the full-text batch was removed (see
+-- DEFERRED note above — CREATE FULLTEXT CATALOG/INDEX cannot run inside any
+-- user transaction, regardless of batch placement). This file uses TWO
+-- GO-delimited batches, both fully transactional-safe:
 --
 --   1. Schema creation. CREATE SCHEMA must be the first statement in a
 --      batch; wrapping it in EXEC() of a dynamic string (001's idiom) gives
@@ -56,17 +91,8 @@
 --      reference objects defined earlier in this same batch, exactly like
 --      registry.machines + registry.repositories (with its FK) in
 --      002_registry_tables.sql, or registry.tasks + its two indexes in
---      006_central_tasks.sql. Neither table needs its own inner GO.
---   3. Full-text catalog + index, in their own batch after another GO.
---      CREATE FULLTEXT INDEX's KEY INDEX clause references
---      PK_memory_chunks, a named constraint created in batch 2; isolating
---      this in its own batch avoids relying on same-batch visibility of a
---      just-created constraint (the same conservative reasoning as the
---      batch-1/batch-2 split above). Unlike CREATE SCHEMA, neither CREATE
---      FULLTEXT CATALOG nor CREATE FULLTEXT INDEX is subject to the
---      "must be first statement in a batch" rule (that rule is specific to
---      CREATE VIEW/PROCEDURE/FUNCTION/TRIGGER/SCHEMA), so no EXEC()
---      wrapping is needed here — the GO boundary alone suffices.
+--      006_central_tasks.sql. Neither table needs its own inner GO. This is
+--      the LAST batch in the file — no trailing GO.
 --
 -- ----------------------------------------------------------------------
 -- Conventions mirrored from 001-007 (database/migrate.py module docstring,
@@ -99,7 +125,10 @@
 -- non-binding sketch in docs/architecture/PROPOSAL.md, superseded by the
 -- epic card's locked description).
 --
--- Deliberately NOT included here (out of this slice's scope):
+-- Deliberately NOT included here:
+--   * Full-text catalog + index — DEFERRED to migration 009, see the
+--     "DEFERRED" header note above (not simply out of scope: it was
+--     authored here originally and removed after a failed live apply).
 --   * No stored procedure/function for VECTOR_DISTANCE query composition —
 --     that is Slice 2 application code (services/api/store.py), not schema.
 --   * No agent-writable memory / edges (later phase, out of this epic).
@@ -107,7 +136,7 @@
 
 
 -- ---------------------------------------------------------------------------
--- Batch 1 of 3: schema
+-- Batch 1 of 2: schema
 -- ---------------------------------------------------------------------------
 IF NOT EXISTS (SELECT 1 FROM sys.schemas WHERE name = 'memory')
 BEGIN
@@ -117,7 +146,7 @@ GO
 
 
 -- ---------------------------------------------------------------------------
--- Batch 2 of 3: tables + indexes
+-- Batch 2 of 2: tables + indexes
 -- ---------------------------------------------------------------------------
 
 -- memory.documents — one row per distinct ingested document.
@@ -227,30 +256,6 @@ CREATE TABLE memory.chunks (
 -- idx_chunks_doc_id).
 CREATE INDEX IX_memory_chunks_document_id
     ON memory.chunks (document_id);
-GO
-
-
--- ---------------------------------------------------------------------------
--- Batch 3 of 3: full-text catalog + index — the lexical half of hybrid
--- retrieval (replaces local's FTS5-over-chunks(text) + BM25 ranking).
---
--- CONFIRMED (card c8e686a9, live probe against 10.42.0.249):
--- Full-Text Search is installed (IsFullTextInstalled = 1, 59 languages).
--- KEY INDEX must be a single-column unique index — PK_memory_chunks
--- (chunk_seq_id, created in batch 2) qualifies. CHANGE_TRACKING AUTO gives
--- near-real-time reindexing after every INSERT, no manual population step.
--- Lexical query at read time (Slice 2, application code) is
--- CONTAINSTABLE(memory.chunks, chunk_text, @query); its RANK column is not
--- BM25, but RRF fuses RANK POSITIONS within each result list rather than
--- raw scores, so a non-BM25 ranker composes fine with the vector-search
--- side of hybrid retrieval.
---
--- NO VECTOR INDEX in this migration — see header note (exact
--- VECTOR_DISTANCE scan; DiskANN is preview and read-only on-prem).
--- ---------------------------------------------------------------------------
-CREATE FULLTEXT CATALOG memory_ft_catalog;
-
-CREATE FULLTEXT INDEX ON memory.chunks (chunk_text)
-    KEY INDEX PK_memory_chunks
-    ON memory_ft_catalog
-    WITH CHANGE_TRACKING AUTO;
+-- No trailing GO: batch 2 is the last batch in this file. The full-text
+-- catalog + index that would have followed here are DEFERRED to migration
+-- 009 — see the "DEFERRED" header note above.
