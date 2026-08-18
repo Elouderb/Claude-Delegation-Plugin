@@ -39,9 +39,18 @@ the epic's lead resolutions:
   map, with the SQL store additionally catching a ``pyodbc.IntegrityError`` as the
   concurrency safety net (mirroring :meth:`SqlStore.upsert_repository`).
 
-VECTOR marshaling is the confirmed migration-008 shape (card c8e686a9): the
-embedding is inserted as ``CAST(? AS VECTOR(384))`` with the bound parameter =
-``json.dumps(embedding_floats)`` (a single cast; ODBC Driver 17 verified).
+VECTOR marshaling (card 4d362ffb CORRECTS the original card c8e686a9 claim
+below): the embedding is inserted as
+``CAST(CAST(? AS NVARCHAR(MAX)) AS VECTOR(384))`` with the bound parameter =
+``json.dumps(embedding_floats)``. The original single ``CAST(? AS VECTOR(384))``
+was "verified" only against a short, clean synthetic vector (~1.9 KB JSON) that
+stays under pyodbc's parameter-streaming threshold; a REALISTIC full-precision
+384-dim embedding (~8 KB JSON) is bound as a streamed SQL_WLONGVARCHAR, and SQL
+Server 2025 refuses to CAST a streamed parameter directly to VECTOR (SQLSTATE
+22018) — this is what failed all 759 documents of the live corpus ETL, and was
+reproduced deterministically in sandboxed rollback-only probes. The
+NVARCHAR(MAX) hop fixes it; ``json.dumps`` is still the correct param
+encoding (a fixed-decimal form was tried and fails).
 ``chunk_id`` is ``mem:<document_id>:<seq>``, byte-identical to the local scheme.
 
 Applying migration 008 / connecting to the live SQL Server is out of scope here
@@ -310,14 +319,21 @@ class MemoryStore:
         """Set-based insert of a document's chunks + embeddings.
 
         ``chunk_seq_id`` is IDENTITY (server-assigned); the embedding is marshaled
-        with the confirmed single ``CAST(? AS VECTOR(n))`` (param =
-        ``json.dumps(floats)``).
+        with a DOUBLE cast, ``CAST(CAST(? AS NVARCHAR(MAX)) AS VECTOR(n))`` (param =
+        ``json.dumps(floats)``). CORRECTION (card 4d362ffb): a single
+        ``CAST(? AS VECTOR(n))`` was originally believed sufficient (card c8e686a9)
+        but fails SQLSTATE 22018 on a realistic ~8KB embedding — pyodbc streams a
+        parameter that long as SQL_WLONGVARCHAR, and SQL Server 2025 will not cast
+        a streamed parameter directly to VECTOR. The NVARCHAR(MAX) hop avoids the
+        streamed-cast path; ``json.dumps`` is still the correct param encoding (a
+        fixed-decimal ``%.9f`` form was tried and fails).
         """
         sql = (
             "INSERT INTO memory.chunks "
             "(chunk_id, document_id, seq, chunk_text, meta, "
             "embedding_model, embedding_dim, embedding) "
-            f"VALUES (?, ?, ?, ?, ?, ?, ?, CAST(? AS VECTOR({self.embedding_dim})))"
+            "VALUES (?, ?, ?, ?, ?, ?, ?, "
+            f"CAST(CAST(? AS NVARCHAR(MAX)) AS VECTOR({self.embedding_dim})))"
         )
         rows = []
         for chunk, vector in zip(doc.chunks, vectors):

@@ -376,5 +376,65 @@ class TestChatGPTExport(unittest.TestCase):
         self.assertTrue(all(d["source_path"] is None for d in mem.documents.values()))
 
 
+class _CaptureCursor:
+    """Bare pyodbc-shaped stand-in: only records ``executemany`` calls.
+
+    No SQL Server, no pyodbc import needed at all — ``MemoryStore._insert_chunks``
+    never touches ``self._connect`` or any driver-specific behavior, so this is
+    all the double is: enough to inspect the SQL text it emits.
+    """
+
+    def __init__(self):
+        self.executemany_calls = []
+
+    def executemany(self, sql, rows):
+        self.executemany_calls.append((sql, list(rows)))
+
+
+class TestInsertChunksVectorCast(unittest.TestCase):
+    """Regression tripwire for card 4d362ffb.
+
+    A single ``CAST(? AS VECTOR(n))`` fails SQLSTATE 22018 on SQL Server 2025
+    for a REALISTIC (~8KB JSON) embedding: pyodbc streams a parameter that long
+    as SQL_WLONGVARCHAR, and the driver will not cast a streamed parameter
+    directly to VECTOR (proven via sandboxed rollback-only probes against the
+    live central DB; the corpus ETL failed on all 759 documents). The fix hops
+    through ``CAST(? AS NVARCHAR(MAX))`` first.
+
+    The hermetic test suite has no real driver, so it can never reproduce the
+    22018 itself — that's exactly why this slipped through originally. What it
+    CAN do, and what this test asserts, is pin the exact SQL shape
+    ``_insert_chunks`` emits, so a silent revert to the single-cast form fails
+    the suite instead of the live ETL.
+    """
+
+    def test_insert_chunks_emits_double_cast_sql(self):
+        from memory_core.adapters import ChunkInput, SourceDocument
+        from services.api.memory_store import MemoryStore
+
+        store = MemoryStore(connect=lambda: None, embedding_dim=384)
+        cur = _CaptureCursor()
+        doc = SourceDocument(
+            doc_id="doc_x",
+            title="Tripwire fixture",
+            source_type="document",
+            source_path=None,
+            content_hash="hash-x",
+            provenance="uploaded",
+            published_at=None,
+            chunks=[ChunkInput(seq=0, text="hello world", meta={})],
+        )
+        embedder = FakeEmbedder(384)
+
+        store._insert_chunks(cur, doc, [[0.0] * 384], embedder)  # noqa: SLF001
+
+        self.assertEqual(len(cur.executemany_calls), 1)
+        sql, rows = cur.executemany_calls[0]
+        self.assertIn("CAST(CAST(? AS NVARCHAR(MAX)) AS VECTOR(384))", sql)
+        # The old, now-falsified single-cast form must not reappear.
+        self.assertNotIn("CAST(? AS VECTOR(384))", sql)
+        self.assertEqual(len(rows), 1)
+
+
 if __name__ == "__main__":
     unittest.main()

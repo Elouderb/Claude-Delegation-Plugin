@@ -23,6 +23,7 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import struct
 import sys
 import tempfile
 import unittest
@@ -74,6 +75,44 @@ class _FixtureEmbedder:
 
     def embed_query(self, text):
         return _vec(0) if self._dim == DIM else [0.0] * self._dim
+
+
+def _realistic_vector(dim: int) -> List[float]:
+    """A REALISTIC full-precision embedding: irregular values round-tripped
+    through float32 pack/unpack (like a real model's output, and like
+    sqlite-vec's own float32 storage), so ``json.dumps`` of the result is long
+    (~8KB at dim=384) with non-clean decimal expansions — NOT the short,
+    exactly-representable values ([0.0]*n, [1.0, 0.5, ...]) that stay under
+    pyodbc's parameter-streaming threshold and would WRONGLY pass a single
+    ``CAST(? AS VECTOR(n))``. Same recipe as the card-4d362ffb rollback-only
+    probes that proved SQLSTATE 22018 against the live central DB.
+    """
+    raw = [((i * 0.0173456789) % 2.0) - 1.0 for i in range(dim)]
+    packed = struct.pack(f"<{dim}f", *raw)
+    return list(struct.unpack(f"<{dim}f", packed))
+
+
+class _RealisticVectorEmbedder:
+    """Deterministic embedder producing :func:`_realistic_vector` for every
+    chunk — used ONLY by the gated live test below, so that test actually
+    reproduces the ~8KB-JSON shape that triggers the pre-fix 22018, unlike
+    ``_FixtureEmbedder`` (whose dim!=DIM branch returns all-zeros: short and
+    clean, exactly the kind of vector that let the original bug slip through).
+    """
+
+    def __init__(self, dim: int, model_name: str = "realistic-fixture-embedder-v1"):
+        self._dim = dim
+        self.model_name = model_name
+
+    @property
+    def dim(self) -> int:
+        return self._dim
+
+    def embed_documents(self, texts):
+        return [_realistic_vector(self._dim) for _ in texts]
+
+    def embed_query(self, text):
+        return _realistic_vector(self._dim)
 
 
 def _fixture_docs() -> List[SourceDocument]:
@@ -480,6 +519,10 @@ class TestLoad(MemoryEtlTestBase):
         self.assertEqual(len(cursor.executemany_calls), 1)
         chunks_sql, chunks_rows = cursor.executemany_calls[0]
         self.assertIn(f"VECTOR({DIM})", chunks_sql)
+        # Double-cast regression guard (card 4d362ffb) through the REAL
+        # etl.run -> MemoryStore._insert_chunks integration path, not just the
+        # unit-level tripwire in test_api_memory_ingest.py.
+        self.assertIn(f"CAST(CAST(? AS NVARCHAR(MAX)) AS VECTOR({DIM}))", chunks_sql)
         self.assertEqual(len(chunks_rows), 2)
         self.assertEqual(chunks_rows[0][0], "mem:doc_alpha:0")  # chunk_id VERBATIM
         self.assertEqual(chunks_rows[0][1], "doc_alpha")
@@ -693,7 +736,12 @@ class MemoryEtlLiveLoadTest(unittest.TestCase):
         self.content_hash = hashlib.sha256(self.doc_id.encode("utf-8")).hexdigest()
 
         store = LocalMemoryStore(self.db_path, embedding_dim=DEFAULT_EMBEDDING_DIM)
-        embedder = _FixtureEmbedder(DEFAULT_EMBEDDING_DIM, model_name="live-fixture-embedder-v1")
+        # REALISTIC vector (card 4d362ffb), not _FixtureEmbedder's all-zeros
+        # dim!=DIM fallback: a short/clean vector wrongly passes the pre-fix
+        # single CAST too, which is exactly how this test would have missed
+        # the bug it now exists to catch.
+        embedder = _RealisticVectorEmbedder(DEFAULT_EMBEDDING_DIM)
+        self.embedder = embedder
         doc = SourceDocument(
             doc_id=self.doc_id,
             title="ETL live smoke test document (synthetic, safe to delete)",
@@ -721,6 +769,13 @@ class MemoryEtlLiveLoadTest(unittest.TestCase):
     def test_load_round_trip_against_live_sql_server(self):
         from contracts import ensure_machine_identity
         from database import migrate as db_migrate
+
+        # Sanity: confirm the fixture actually reproduces the realistic ~8KB
+        # JSON shape that triggers SQLSTATE 22018 on a single CAST pre-fix —
+        # a short/clean vector would silently fail to exercise the marshaling
+        # bug, which is how the original single-cast claim went unnoticed.
+        sample_json_len = len(json.dumps(self.embedder.embed_query("x")))
+        self.assertGreater(sample_json_len, 5000)
 
         identity = ensure_machine_identity()
         result = etl.run(
