@@ -63,6 +63,7 @@ deterministic fake embedder and never touch SQL Server.
 from __future__ import annotations
 
 import json
+import logging
 import math
 import re
 from dataclasses import dataclass, field
@@ -73,6 +74,8 @@ from memory_core.availability import DEFAULT_EMBEDDING_DIM
 from memory_core.embeddings import Embedder
 from memory_core.reranker import Reranker
 from memory_core.retrieval import RRF_K, fuse_ranked_ids
+
+logger = logging.getLogger(__name__)
 
 # Cap the IN-list size for the scoped preload so we stay well under SQL Server's
 # parameter limit (2100); document batches are tiny in practice.
@@ -261,6 +264,81 @@ def _contains_query(text: str) -> Optional[str]:
     if not terms:
         return None
     return " OR ".join(f'"{t}"' for t in terms)
+
+
+# Okapi BM25 parameters for the hub's lexical re-rank (standard defaults, and the
+# exact values validated by the card b81ef155 eval-gate prototype).
+_BM25_K1 = 1.5
+_BM25_B = 0.75
+
+
+def _bm25_rerank(terms: Sequence[str], docs: Sequence[tuple]) -> List[str]:
+    """Re-order a lexical candidate pool by pool-local Okapi BM25.
+
+    SQL Server's CONTAINSTABLE ``RANK`` is a weaker top-of-list ordering than the
+    local FTS5 ``bm25()`` the sqlite store uses, so RRF (which weights rank
+    POSITIONS) gets a weaker lexical signal from the hub and the fused nDCG@10
+    regresses (card b81ef155 eval gate: -0.086 on keyword-gold). Rescoring the
+    SAME CONTAINSTABLE candidate pool with a pool-local BM25 — document
+    frequencies computed over the pool, not the whole corpus — restores the
+    ordering to net-positive WITHOUT deepening the pool (a deeper pool tested
+    worse and slower).
+
+    ``terms`` are the query's ``\\w+`` terms; they are lowercased here (as is the
+    document text) so the caller can pass the raw :func:`_query_terms` output.
+    ``docs`` is the RANK-ordered ``[(chunk_id, chunk_text), ...]`` pool. Returns
+    the chunk_ids reordered by DESCENDING BM25 score; equal scores keep the input
+    (RANK) order via the original index, so the result is fully deterministic.
+
+    This is a PURE helper — no DB, no model — and is HUB-ONLY: the local store
+    already gets true ``bm25()`` from FTS5 and needs no re-rank. Degenerate inputs
+    return the input order unchanged (empty ``terms``, empty ``docs``, or an
+    all-empty pool whose average document length is zero); ``docs`` empty yields
+    ``[]``.
+    """
+    if not terms or not docs:
+        return [cid for cid, _ in docs]
+    query_terms = [t.lower() for t in terms if t]
+    if not query_terms:
+        return [cid for cid, _ in docs]
+
+    tokenized = [(cid, _WORD_RE.findall((text or "").lower())) for cid, text in docs]
+    n = len(tokenized)
+    avgdl = sum(len(toks) for _, toks in tokenized) / n
+    if avgdl <= 0.0:
+        return [cid for cid, _ in docs]
+
+    # Pool-local document frequency per query term.
+    df: Dict[str, int] = {}
+    for _, toks in tokenized:
+        present = set(toks)
+        for term in query_terms:
+            if term in present:
+                df[term] = df.get(term, 0) + 1
+
+    scored: List[tuple] = []
+    for idx, (cid, toks) in enumerate(tokenized):
+        tf: Dict[str, int] = {}
+        for w in toks:
+            tf[w] = tf.get(w, 0) + 1
+        dl = len(toks)
+        score = 0.0
+        for term in query_terms:
+            f = tf.get(term, 0)
+            if not f:
+                continue
+            d = df.get(term, 0)
+            idf = math.log(1 + (n - d + 0.5) / (d + 0.5))
+            score += idf * (f * (_BM25_K1 + 1)) / (
+                f + _BM25_K1 * (1 - _BM25_B + _BM25_B * dl / avgdl)
+            )
+        # Negate the score so a plain ascending sort puts the best first; ``idx``
+        # is the stable tie-break, preserving the original RANK order for equal
+        # scores (and making the sort deterministic without relying on stability).
+        scored.append((-score, idx, cid))
+
+    scored.sort()
+    return [cid for _, _, cid in scored]
 
 
 def _candidate_pool(top_k: int) -> int:
@@ -779,14 +857,27 @@ class MemoryStore:
         return [r["chunk_id"] for r in self._rows(cur)]
 
     def _lexical_candidate_ids(
-        self, cur, contains_expr: str, pool: int, filt_sql: str, filt_params: List[str]
+        self,
+        cur,
+        contains_expr: str,
+        terms: Sequence[str],
+        pool: int,
+        filt_sql: str,
+        filt_params: List[str],
     ) -> List[str]:
-        """Full-text CONTAINSTABLE candidate chunk_ids, most-relevant first.
+        """Full-text CONTAINSTABLE candidate chunk_ids, re-ranked by pool-local BM25.
 
         CONTAINSTABLE returns ``[KEY]`` (the KEY INDEX value = ``chunk_seq_id``) and
-        ``[RANK]`` (SQL Server's proprietary relevance, not BM25 — fine, RRF fuses
-        rank POSITIONS). Join back to chunks on ``chunk_seq_id`` and ORDER BY RANK
-        DESC. Requires migration 009's full-text index to exist.
+        ``[RANK]`` (SQL Server's proprietary relevance, not BM25). The RANK-ordered
+        query below is left UNCHANGED — it is still the candidate SOURCE (join back
+        to chunks on ``chunk_seq_id``, ORDER BY RANK DESC; requires migration 009's
+        full-text index). But CONTAINSTABLE RANK is a weaker top-of-list ordering
+        than the local FTS5 ``bm25()``, which drops the fused nDCG@10 (card
+        b81ef155). So we fetch the pool's ``chunk_text`` once and re-order the SAME
+        ids with :func:`_bm25_rerank` (pool-local BM25). ROBUSTNESS: if there are no
+        terms, no candidates, no text, or ANY scoring error, we fall back to the
+        original RANK order — a ranking refinement must never crash a query (a
+        lexical-arm failure must not 500 the endpoint).
         """
         sql = (
             "SELECT TOP (?) c.chunk_id "
@@ -801,7 +892,45 @@ class MemoryStore:
             params += filt_params
         sql += " ORDER BY kt.[RANK] DESC"
         cur.execute(sql, *params)
-        return [r["chunk_id"] for r in self._rows(cur)]
+        rank_ids = [r["chunk_id"] for r in self._rows(cur)]
+
+        if not terms or not rank_ids:
+            return rank_ids
+        try:
+            texts = self._load_chunk_texts(cur, rank_ids)
+            if not texts:
+                return rank_ids
+            docs = [(cid, texts.get(cid, "")) for cid in rank_ids]
+            return _bm25_rerank(terms, docs)
+        except Exception:  # pragma: no cover - defensive; never fail a query on re-rank
+            logger.exception(
+                "BM25 lexical re-rank failed; falling back to CONTAINSTABLE RANK order"
+            )
+            return rank_ids
+
+    def _load_chunk_texts(self, cur, chunk_ids: Sequence[str]) -> Dict[str, str]:
+        """Fetch ``chunk_text`` for a set of chunk_ids (batched IN-list).
+
+        Feeds the BM25 lexical re-rank (:func:`_bm25_rerank`): the CONTAINSTABLE
+        candidate SQL returns only ids ordered by RANK, so the pool's text must be
+        read once to rescore it. Batched exactly like :meth:`_load_candidate_rows`
+        (``_IN_CHUNK`` per statement); the returned map is unordered — the caller
+        re-imposes the RANK order.
+        """
+        texts: Dict[str, str] = {}
+        ids = list(chunk_ids)
+        if not ids:
+            return texts
+        for batch in _chunked(ids):
+            placeholders = ",".join("?" * len(batch))
+            cur.execute(
+                "SELECT chunk_id, chunk_text FROM memory.chunks "
+                f"WHERE chunk_id IN ({placeholders})",
+                *batch,
+            )
+            for r in self._rows(cur):
+                texts[r["chunk_id"]] = r["chunk_text"]
+        return texts
 
     def _load_candidate_rows(self, cur, chunk_ids: Sequence[str]) -> Dict[str, dict]:
         """Hydrate the fused chunk_ids with document metadata (batched IN-list).
@@ -861,6 +990,7 @@ class MemoryStore:
 
         query_vec = embedder.embed_query(query)
         contains_expr = _contains_query(query)
+        lexical_terms = _query_terms(query)
         filt_sql, filt_params = self._doc_filter_sql(source_type, date_from, date_to)
 
         conn = self._connect()
@@ -870,7 +1000,7 @@ class MemoryStore:
             fts_ids: List[str] = []
             if contains_expr:
                 fts_ids = self._lexical_candidate_ids(
-                    cur, contains_expr, pool, filt_sql, filt_params
+                    cur, contains_expr, lexical_terms, pool, filt_sql, filt_params
                 )
             fused = fuse_ranked_ids(vec_ids, fts_ids, top_k=pool_target, k=RRF_K)
             rows_by_id = self._load_candidate_rows(cur, [cid for cid, _ in fused])

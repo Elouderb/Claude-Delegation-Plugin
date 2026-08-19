@@ -36,7 +36,7 @@ from memory_core.availability import (  # noqa: E402
     check_availability,
 )
 from services.api.app import create_app  # noqa: E402
-from services.api.memory_store import FakeMemoryStore  # noqa: E402
+from services.api.memory_store import FakeMemoryStore, _bm25_rerank  # noqa: E402
 from services.api.store import FakeStore  # noqa: E402
 
 _KEY = "test-api-key"
@@ -118,6 +118,84 @@ _LOCAL_ROW_KEYS = {
     "published_at", "ingested_at", "source_path", "provenance",
     "embedding_model", "meta",
 }
+
+
+# --------------------------------------------------------------------------- #
+# _bm25_rerank — the hub-only pool-local BM25 lexical re-rank (pure, no DB)
+# --------------------------------------------------------------------------- #
+class TestBm25Rerank(unittest.TestCase):
+    """The pure helper that fixes the CONTAINSTABLE-RANK-vs-FTS5-bm25() regression
+    (card b81ef155). Deterministic; no DB, no corpus — synthetic docs only."""
+
+    def test_more_matches_rank_above_fewer(self):
+        # c2 matches "apple" three times, c1 matches "banana" once, c3 matches none.
+        docs = [
+            ("c1", "banana bread"),
+            ("c2", "apple apple apple pie"),
+            ("c3", "cherry tart"),
+        ]
+        order = _bm25_rerank(["apple", "banana"], docs)
+        self.assertEqual(order, ["c2", "c1", "c3"])
+
+    def test_rarer_term_outranks_common_term(self):
+        # "rare" occurs in one doc (high IDF); "common" in three (low IDF). With
+        # equal tf and length, the rare-term doc must sort first; the common-term
+        # docs tie and keep their input (RANK) order.
+        docs = [
+            ("c1", "common word"),
+            ("c2", "rare word"),
+            ("c3", "common thing"),
+            ("c4", "common stuff"),
+        ]
+        order = _bm25_rerank(["common", "rare"], docs)
+        self.assertEqual(order, ["c2", "c1", "c3", "c4"])
+
+    def test_higher_tf_outranks_lower_tf_same_term(self):
+        docs = [
+            ("lo", "alpha beta"),
+            ("hi", "alpha alpha alpha beta"),
+        ]
+        order = _bm25_rerank(["alpha"], docs)
+        self.assertEqual(order[0], "hi")
+
+    def test_empty_terms_preserves_input_order(self):
+        docs = [("c1", "x y"), ("c2", "z w")]
+        self.assertEqual(_bm25_rerank([], docs), ["c1", "c2"])
+
+    def test_blank_only_terms_preserve_input_order(self):
+        docs = [("c1", "x y"), ("c2", "z w")]
+        self.assertEqual(_bm25_rerank(["", "  "], docs), ["c1", "c2"])
+
+    def test_empty_docs_returns_empty(self):
+        self.assertEqual(_bm25_rerank(["anything"], []), [])
+
+    def test_all_empty_token_pool_preserves_input_order(self):
+        # avgdl == 0 guard: a pool whose docs tokenize to nothing (blank / no
+        # word chars) must fall back to the input (RANK) order, not divide by zero.
+        docs = [("c1", "   "), ("c2", ""), ("c3", "!!! ---")]
+        self.assertEqual(_bm25_rerank(["apple"], docs), ["c1", "c2", "c3"])
+
+    def test_no_term_matches_preserves_input_order(self):
+        docs = [("c1", "alpha beta"), ("c2", "gamma delta")]
+        self.assertEqual(_bm25_rerank(["zzz", "qqq"], docs), ["c1", "c2"])
+
+    def test_case_insensitive(self):
+        docs = [("c1", "APPLE Apple apple"), ("c2", "pear")]
+        self.assertEqual(_bm25_rerank(["ApPlE"], docs), ["c1", "c2"])
+
+    def test_none_text_does_not_crash(self):
+        docs = [("c1", None), ("c2", "apple apple")]
+        self.assertEqual(_bm25_rerank(["apple"], docs), ["c2", "c1"])
+
+    def test_deterministic_repeated_calls(self):
+        docs = [
+            ("c1", "banana bread"),
+            ("c2", "apple apple apple pie"),
+            ("c3", "cherry tart"),
+        ]
+        first = _bm25_rerank(["apple", "banana"], docs)
+        second = _bm25_rerank(["apple", "banana"], docs)
+        self.assertEqual(first, second)
 
 
 # --------------------------------------------------------------------------- #
