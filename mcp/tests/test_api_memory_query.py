@@ -169,6 +169,12 @@ class TestBm25Rerank(unittest.TestCase):
     def test_empty_docs_returns_empty(self):
         self.assertEqual(_bm25_rerank(["anything"], []), [])
 
+    def test_all_empty_token_pool_preserves_input_order(self):
+        # avgdl == 0 guard: a pool whose docs tokenize to nothing (blank / no
+        # word chars) must fall back to the input (RANK) order, not divide by zero.
+        docs = [("c1", "   "), ("c2", ""), ("c3", "!!! ---")]
+        self.assertEqual(_bm25_rerank(["apple"], docs), ["c1", "c2", "c3"])
+
     def test_no_term_matches_preserves_input_order(self):
         docs = [("c1", "alpha beta"), ("c2", "gamma delta")]
         self.assertEqual(_bm25_rerank(["zzz", "qqq"], docs), ["c1", "c2"])
